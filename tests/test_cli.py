@@ -38,7 +38,7 @@ def test_run_dry_run_end_to_end(tmp_config, tmp_path, monkeypatch):
     md = (week / "pulse.md").read_text(encoding="utf-8")
     assert md.startswith("Groww Weekly Review Pulse — Week of 16 Nov 2026\nSource: 3 reviews")
     assert "Top Themes" in md and "What Users Said" in md and "Action Ideas" in md
-    assert md.count("• “") == 3
+    assert sum(x.startswith("• ") and ": “" in x for x in md.splitlines()) == 3
     validation = json.loads((week / "validation.json").read_text(encoding="utf-8"))
     assert validation["ok"] and set(validation["checks"].values()) == {"pass"}
     pulse = json.loads((week / "pulse.json").read_text(encoding="utf-8"))

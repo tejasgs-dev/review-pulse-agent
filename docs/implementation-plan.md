@@ -249,7 +249,9 @@ The catalogue starts from the 8 seed themes plus what W46 showed (order executio
 ### Deliverables
 - `themes.json` for 2026-W46 from the local engine, with labels, shares, scores and assignments, and no API call.
 
-*Status (2026-11-22): done. On W46: 5 themes (Customer support 16%, Stocks & portfolio 14%, Bugs & app updates 13%, Feature requests 12%, Charges & brokerage 9%), general praise 24%, `other` 12%, stability median ARI 0.83, all 1,348 reviews assigned, about 14 s including the model load, and no API call. Two runs give byte-identical `themes.json`. Still open: the human spot check of 20 assignments, and the timing on GitHub Actions.*
+*Status (2026-11-22): done. On W46: 5 themes (Customer support 16%, Stocks & portfolio 14%, Bugs & app updates 13%, Feature requests 12%, Charges & brokerage 9%), general praise 24%, `other` 12%, stability median ARI 0.83, all 1,348 reviews assigned, about 14 s including the model load, and no API call. Two runs give byte-identical `themes.json`. Still open: the timing on GitHub Actions, and the human spot check of 20 assignments.*
+
+*Update (2026-11-22): the spot-check sheet is ready at `runs/2026-W46/theme_review_sample.md` (git-ignored): 20 reviews drawn at random with seed 46, 8 of them multi-topic (a secondary theme, or at least 2 keywords from each of two or more catalogue topics), each with its text, assigned and secondary theme and a blank "Correct? Y/N" column. Waiting for the project owner to fill it in; the exit criterion is at least 17 of 20 correct.*
 
 ### Exit criteria
 - 5 or fewer themes on real data; 100% of reviews assigned; `other` at 25% or less.
@@ -289,29 +291,36 @@ The catalogue starts from the 8 seed themes plus what W46 showed (order executio
 
 This is a heuristic. The gap stays recorded, and humans still read the first pulses (Phase 7).
 
+**Quote fit (rules; added 2026-11-22).** Sharing a keyword with the theme is not enough: the first W46 pulse quoted a review about spam calls and sold contact details under Stocks & portfolio because it said "selling" and "trading". A theme member may be quoted only when:
+1. **its own theme centre is clearly the nearest:** it has no secondary theme (no other theme centre within `secondary_margin` of its own);
+2. **it is not about a subject no theme covers:** it mentions none of `analysis.local.quote_off_topic_words` (spam, privacy, contact details, personal data, hacked, …);
+3. **it is not mainly about another topic:** it matches at least one keyword of its own catalogue entry, and no other catalogue entry matches more of its words.
+
+The up-to-8 candidates are then drawn from the members that fit (`select_candidates` on the fitting members), so the gate cannot empty the pool early. On W46 273 of the 575 top-theme reviews fit; `validation.json` records the counts per theme (`quote_fit`).
+
 **Quote pick (rules).** For each top theme, score each remaining candidate and take the best (ties broken by review ID):
 1. **Representative:** cosine similarity to the theme centroid (the embedding from L2).
-2. **On topic:** contains at least one of the theme's top keywords.
+2. **On topic:** the number of the theme's top keywords in the quote window (fit already requires one catalogue keyword).
 3. **Typical voice:** when the theme's negative share is 50% or more, prefer a 1–2★ review; otherwise any rating.
 4. **Short:** prefer 10–30 words.
 
-The quote is the window of 1–2 consecutive whole sentences (from `sentence_spans`) with the most theme keywords, within 8–35 words; failing that, the whole review if it is within 60 words. Code slices `canonical_text`, so quotes stay verbatim and on sentence boundaries. The three quotes come from three different reviews.
+The quote is the window of 1–2 consecutive whole sentences (from `sentence_spans`) with the most theme keywords, within 8–35 words; failing that, the whole review if it is within 60 words. Code slices `canonical_text`, so quotes stay verbatim and on sentence boundaries. The three quotes come from three different reviews. The renderer prints each quote after the label of the theme it illustrates (`• Customer support: “…” (★1, Play Store)`), for both engines.
 
 **Summaries, actions and signals (templates).** Each catalogue entry in `config/themes.yaml` has short templates (plus short forms for the word-count fallback):
 - `summary`: "Reviewers hit errors, crashes or broken screens, often around {kw1} and {kw2}"
 - `action`: "Triage the {recent_count} bug reports from the last two weeks and ship a fix for the most common one in the next release"
 - `signal`: "fewer than {recent_count} bug reports in the next two weeks"
 
-*(Revised 2026-11-22, project owner: actions and signals carry **that week's figures and top keywords**, so they don't read identically every week.)* Placeholders are filled by code: `{kw1}`–`{kw3}` with the theme's top keywords, and `{count}`, `{recent_count}`, `{share}`, `{negative_share}`, `{trend}` with the computed stats. Summaries may use keywords only, since the renderer already prints the shares next to them (CMP-22); templates never contain typed digits, so every figure comes from the stats. A theme with no catalogue match uses generic templates:
+*(Revised 2026-11-22, project owner: actions and signals carry **that week's figures and top keywords**, so they don't read identically every week.)* Placeholders are filled by code: `{kw1}`–`{kw3}` with the theme's top keywords, and `{recent_count}` and `{trend}` with the computed stats. *(Revised 2026-11-22.)* **Actions and signals use one period only, the last two weeks:** `{recent_count}` (theme reviews in the last 14 days) and the `{trend}` word. The first W46 pulse mixed periods ("the 184 portfolio reviews … fewer than 42 … in the next two weeks": 184 was the whole 10-week window), so whole-window figures (`{count}`, `{share}`, `{negative_share}`) are now rejected in actions and signals when the catalogue loads, and every action, short action and signal names "the last two weeks" or "the next two weeks". Summaries may use keywords only, since the renderer already prints the shares next to them (CMP-22); templates never contain typed digits, so every figure comes from the stats. A theme with no catalogue match uses generic templates:
 - summary: "Reviewers often mention {kw1}, {kw2} and {kw3}"
-- action: "Review the {count} reviews mentioning {kw1} ({trend}) with the owning team and fix the most common problem"
+- action: "Review the {recent_count} reviews mentioning {kw1} from the last two weeks ({trend}) with the owning team and fix the most common problem"
 - signal: "fewer than {recent_count} reviews mentioning {kw1} in the next two weeks"
 
 Figures in actions and signals come from the same stats the renderer uses, so they always agree with the theme line; the validator's `no_stats_in_text` check still applies to summaries.
 
 **Validation and fallbacks.** The same `validate.py`. Because the rules are deterministic, a retry means taking the next option, not asking again:
 - a quote problem → the next-best candidate for that theme;
-- too many words → one-sentence quotes, then the short form of each template (`summary_short`, `action_short`).
+- too many words → shorten in steps, so the actions keep their full wording as long as possible: first shorter quotes (at most 25 words) and the short summaries (`summary_short`), then shorter quotes still (18 words) and the short actions (`action_short`, which also carry the two-week figure). *(Revised 2026-11-22: the first version switched every template to its short form at once, so on W46 a 270-word draft dropped to 204 words and lost the figures in its actions.)*
 
 At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 
@@ -329,12 +338,19 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
   - [x] templates: placeholders filled, the week's figures in actions and signals, no numbers in summaries, generic fallback for an unmatched theme;
   - [x] fallbacks: the next candidate on a quote failure; short templates on word-count overflow; `failure.json` after 2 rounds;
   - [x] end-to-end `pulse run --dry-run --skip-ingest` with the local engine on fixture reviews, using a stub embedding function in CI so no model download is needed;
-  - [x] the existing validator contract tests and golden file keep passing unchanged.
+  - [x] the existing validator contract tests keep passing; the golden file now has the theme label before each quote.
+- [x] Follow-up fixes after the first W46 read (2026-11-22), each with a regression test:
+  - [x] quote fit: nearest-centre margin, `quote_off_topic_words`, and "not mainly another catalogue topic" (`QuoteFit` in `rules_compose.py`; `tests/test_rules_compose.py`: a spam/contact-details review sharing theme keywords, a review mainly about charges, a review with a secondary theme, and an end-to-end compose that never quotes an off-topic review);
+  - [x] each quote labelled with its theme name, following the quote's theme rather than its position (`tests/test_render.py`);
+  - [x] one period in actions and signals: whole-window placeholders rejected, every template checked against the W46 figures 184 / 42 (`tests/test_catalogue.py`, `tests/test_rules_compose.py`);
+  - [x] staged word-count fallback: a small overflow shortens summaries and quotes but keeps the full actions (`tests/test_rules_compose.py`).
 
 ### Deliverables
 - **M1:** `pulse run --dry-run` produces `runs/{week}/pulse.md` from real reviews, with no API key.
 
 *Status (2026-11-22): **M1 reached with the local engine.** `pulse run --dry-run --skip-ingest --week 2026-W46` passes every validator check on the first attempt (246/250 words) with no API key and no network after the model is cached. The name filter flags 13% of W46 reviews as possibly naming a person; they are never quoted. Still open: the human read of the pulse.*
+
+*Update (2026-11-22): follow-up fixes after the first read are done (see the last task above). The W46 dry run passes on the second attempt, at 241/250 words (the first draft is 270 words, so the summaries and quotes are shortened; the actions keep their full wording). The Stocks & portfolio quote is now an on-topic options-trading review instead of the spam-calls one, which fails the fit gate on "contact details". All three actions and signals use the last-two-weeks counts (41, 42, 28). 451 offline tests pass. Still open: the human read of the new pulse, and the theme spot check (Phase 3).*
 
 ### Exit criteria
 - The dry run on real W46 data passes every validator check, with no network call after the model is cached.

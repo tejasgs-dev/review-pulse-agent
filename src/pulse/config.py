@@ -117,6 +117,9 @@ class LocalEngineConfig(_Strict):
     specific_words: list[str] = Field(min_length=1)
     vague_words: list[str] = Field(min_length=1)
     name_allowlist: list[str] = Field(default_factory=list)
+    # Subjects no theme covers (spam calls, privacy, ...): a review that mentions one is
+    # never quoted, whichever theme it was clustered into.
+    quote_off_topic_words: list[str] = Field(default_factory=list)
 
 
 Engine = Literal["local", "llm"]

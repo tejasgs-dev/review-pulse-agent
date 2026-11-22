@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -89,3 +90,15 @@ def test_email_appends_doc_link():
     body = render_email(p, product="Groww", min_words=9, doc_url="https://docs.google.com/x")
     assert body.endswith("\nFull pulse: https://docs.google.com/x\n")
     assert body.startswith(render_doc(p, product="Groww", min_words=9))
+
+
+def test_each_quote_is_labelled_with_its_own_theme():
+    pulse = valid_pulse()
+    labels = {t.id: t.label for t in pulse.top_themes}
+    # Shuffle the quote order: the label must follow the quote's theme, not its position.
+    pulse = replace(pulse, quotes=list(reversed(pulse.quotes)))
+    lines = [line for line in render_doc(pulse, product="Groww", min_words=9).splitlines()
+             if line.startswith("• ")]
+    assert len(lines) == len(pulse.quotes) == 3
+    for line, q in zip(lines, pulse.quotes, strict=True):
+        assert line.startswith(f"• {labels[q.theme_id]}: “{q.text}”"), line

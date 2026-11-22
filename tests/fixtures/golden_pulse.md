@@ -7,9 +7,9 @@ Top Themes
 3. Unhelpful support (<1% of reviews · 95% 1–2★) — Tickets are closed without a fix and replies are copy-pasted.
 
 What Users Said
-• “I asked to withdraw my money five days ago.” (★1, Play Store)
-• “Every morning at market open the order screen freezes for a minute, so my orders go through late at a worse price.” (★2, App Store)
-• “Support closed my ticket without reading it and the chat bot keeps sending the same copy paste answer every time.” (★1, Play Store)
+• Withdrawal delays: “I asked to withdraw my money five days ago.” (★1, Play Store)
+• Market-open freezes: “Every morning at market open the order screen freezes for a minute, so my orders go through late at a worse price.” (★2, App Store)
+• Unhelpful support: “Support closed my ticket without reading it and the chat bot keeps sending the same copy paste answer every time.” (★1, Play Store)
 
 Action Ideas
 1. Withdrawal delays: Show the expected credit date on every pending withdrawal. Watch for: fewer reviews asking where a withdrawal is.

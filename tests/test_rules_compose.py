@@ -1,13 +1,16 @@
 import re
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from pulse.analysis.catalogue import load_catalogue
+from pulse.analysis.cluster import Label
 from pulse.analysis.compose import ComposeError, build_contexts
 from pulse.analysis.engines.local_cluster import run_local_clustering
 from pulse.analysis.engines.rules_compose import (
     NameFilter,
+    QuoteFit,
     best_window,
     compose_pulse_rules,
     score_candidates,
@@ -106,6 +109,69 @@ def test_scoring_skips_named_people_and_is_deterministic(cfg, catalogue):
         assert [s.review.id for s in scored] == [s.review.id for s in again]
 
 
+# ------------------------------------------------------------------ quote fit (regression)
+# W46 quoted "groww is selling users contact details ... spam call about trading" under
+# Stocks & portfolio: it shared "selling" and "trading" with the theme, but it is about spam
+# and privacy. A quote must now clearly belong to its theme, not just share a keyword.
+
+SPAM = ("this app is selling users contact details, since I opened my account I get spam "
+        "calls about trading every day")
+
+
+def _fit(cfg, catalogue, *labels):
+    cluster = SimpleNamespace(assignments={x.review_id: x for x in labels})
+    return QuoteFit(cluster, catalogue, cfg.analysis.local.quote_off_topic_words)
+
+
+def test_off_topic_review_sharing_keywords_is_not_a_quote(cfg, catalogue):
+    r = rv(SPAM, i=1)
+    fit = _fit(cfg, catalogue, Label(r.id, "stocks_portfolio"))
+    assert "off-topic" in fit.reason(r, "stocks_portfolio")
+    assert "privacy" in cfg.analysis.local.quote_off_topic_words
+
+
+def test_review_mainly_about_another_theme_is_not_a_quote(cfg, catalogue):
+    r = rv("Bought one stock and the brokerage charges, hidden fees and gst deducted were "
+           "higher than the profit", i=2)
+    fit = _fit(cfg, catalogue, Label(r.id, "stocks_portfolio"))
+    assert fit.reason(r, "stocks_portfolio").startswith("mainly about charges")
+
+
+def test_review_not_clearly_closest_to_its_own_centre_is_not_a_quote(cfg, catalogue):
+    r = rv("Selling my stocks in the portfolio is hard, the market screen is confusing", i=3)
+    near = _fit(cfg, catalogue, Label(r.id, "stocks_portfolio", "feature_requests"))
+    assert "centre" in near.reason(r, "stocks_portfolio")
+    clear = _fit(cfg, catalogue, Label(r.id, "stocks_portfolio"))
+    assert clear.reason(r, "stocks_portfolio") is None
+    assert "not assigned" in clear.reason(r, "support")
+
+
+def test_review_with_no_theme_keyword_is_not_a_quote(cfg, catalogue):
+    r = rv("I have used many apps over the years and this one is just not for me", i=4)
+    assert "none of the theme" in _fit(cfg, catalogue, Label(r.id, "support")).reason(
+        r, "support")
+
+
+def test_composer_never_quotes_an_off_topic_review(cfg, catalogue):
+    reviews, cluster = clustered(cfg, catalogue)
+    # Make the most recent review of every top theme an on-keyword but off-topic one, so it
+    # would be the first candidate without the fit gate.
+    for tid in cluster.top:
+        i = max((n for n, r in enumerate(reviews)
+                 if cluster.assignments[r.id].theme_id == tid),
+                key=lambda n: (reviews[n].review_date, reviews[n].id))
+        kw = " ".join(cluster.keywords[tid][:3])
+        reviews[i] = replace(reviews[i], canonical_text=f"{kw} {SPAM}")
+    result = compose_pulse_rules(cluster, reviews, cfg, catalogue)
+    assert result.report.ok
+    assert all("spam" not in q.text for q in result.pulse.quotes)
+    fit = QuoteFit(cluster, catalogue, cfg.analysis.local.quote_off_topic_words)
+    by_id = {r.id: r for r in reviews}
+    for q in result.pulse.quotes:
+        assert fit.reason(by_id[q.review_id], q.theme_id) is None
+        assert cluster.assignments[q.review_id].secondary_theme_id is None
+
+
 # ------------------------------------------------------------------ templates
 
 
@@ -116,8 +182,11 @@ def test_templates_use_this_weeks_figures_and_keywords(cfg, catalogue):
     stats = {c.id: c.stats for c in contexts}
     for a in writing.actions:
         s = stats[a.theme_id]
-        assert str(s.count) in a.action or str(s.recent_count) in a.action
-        assert str(s.recent_count) in a.signal
+        # One period (regression): the action's figure and the signal's target are both the
+        # last two weeks' count, never the whole window's.
+        assert str(s.recent_count) in a.action and str(s.recent_count) in a.signal
+        if s.count != s.recent_count:
+            assert f" {s.count} " not in f" {a.action} {a.signal} "
     for summary in writing.summaries:
         assert not re.search(r"\d", summary.summary)          # CMP-22: no numbers
         assert "{" not in summary.summary
@@ -169,6 +238,23 @@ def test_word_overflow_falls_back_to_short_templates(cfg, catalogue, tmp_config)
     assert len(result.attempts) >= 2
     assert result.attempts[0]["checks"]["word_count"] == "fail"
     assert result.attempts[-1]["short_templates"] is True
+
+
+def test_slight_overflow_shortens_summaries_but_keeps_full_actions(cfg, catalogue, tmp_config):
+    # Regression: on W46 the first overflow switched every template to its short form at once,
+    # so the actions lost their figures. A small overflow now shortens summaries and quotes only.
+    from pulse.config import load_config
+    full, _ = _word_counts(cfg, catalogue)
+    tight = load_config(tmp_config(lambda d: d["analysis"].__setitem__("max_words", full - 1)),
+                        load_env_file=False)
+    reviews, cluster = clustered(tight, catalogue)
+    result = compose_pulse_rules(cluster, reviews, tight, catalogue)
+    assert result.report.ok and len(result.attempts) == 2
+    assert result.attempts[1]["short_templates"] is True
+    assert result.attempts[1]["short_actions"] is False
+    contexts = build_contexts(cluster, reviews, tight)
+    full_actions = write_from_templates(contexts, cluster, catalogue, short=False).actions
+    assert [a.action for a in result.pulse.actions] == [a.action for a in full_actions]
 
 
 def test_gives_up_with_every_attempt_recorded(cfg, catalogue, tmp_config):

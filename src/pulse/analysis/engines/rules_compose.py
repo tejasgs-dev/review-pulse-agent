@@ -7,6 +7,11 @@
   start of a sentence too) that is neither a common word in this run's reviews (seen in
   lowercase at least twice) nor on the allowlist.
   It errs towards skipping; humans still read the first pulses.
+- **Quote fit.** A review is only quoted for its theme when it clearly belongs there: its own
+  theme centre is the nearest by a margin (no secondary theme), it mentions no subject that
+  belongs to no theme (spam, privacy, ...: `quote_off_topic_words`), and it matches more of
+  its own catalogue entry's keywords than any other entry's. Sharing one keyword is not enough.
+  The candidate pool is drawn from the reviews that fit, so the gate cannot empty it early.
 - **Quote pick.** Candidates are scored by similarity to the theme centroid, theme keywords,
   a 1–2★ rating when the theme is mostly negative, and a 10–30 word length. The quote is the
   1–2 whole sentences with the most theme keywords; code slices `canonical_text`, so quotes
@@ -15,7 +20,9 @@
   and signals carry this week's figures and keywords (filled in by code), so they differ from
   week to week; summaries carry keywords only (the renderer prints the shares, CMP-22).
 - **Fallbacks.** A failed check moves to the next option: the next candidate for a quote
-  problem; shorter quotes and the short templates for too many words. At most 2 rounds.
+  problem. Too many words shortens in steps, so the actions keep their figures as long as
+  possible: first shorter quotes and the short summaries, then shorter quotes still and the
+  short actions too. At most 2 rounds.
 """
 
 from __future__ import annotations
@@ -43,9 +50,11 @@ from pulse.analysis.compose import (
     assemble,
     build_contexts,
     build_quotes,
+    select_candidates,
     sentence_spans,
     trend_word,
 )
+from pulse.analysis.engines.local_cluster import word_pattern
 from pulse.analysis.validate import validate_pulse
 from pulse.config import PulseConfig
 from pulse.models import CleanReview
@@ -130,6 +139,45 @@ def best_window(review: CleanReview, keyword_tokens: set[str], *, min_words: int
     return best[1] if best else None
 
 
+class QuoteFit:
+    """Whether a review is a fair quote for its theme, beyond sharing a keyword with it.
+
+    `reason()` returns why a review does not fit, or None when it does:
+    1. it must be assigned to the theme, with no secondary theme: its own theme centre is the
+       nearest, and no other centre is within `secondary_margin` of it;
+    2. it must not mention a subject that belongs to no theme (`quote_off_topic_words`);
+    3. it must match at least one keyword of its own catalogue entry, and no other catalogue
+       entry may match more of its words (then it is mainly about that other topic).
+    A theme with no catalogue entry is compared using its own top keywords.
+    """
+
+    def __init__(self, cluster: ClusterResult, catalogue: Catalogue,
+                 off_topic_words: Sequence[str]) -> None:
+        self.cluster = cluster
+        self.entries = {e.id: frozenset(_stem(t) for t in e.tokens) for e in catalogue.themes}
+        self.off_topic = word_pattern(off_topic_words) if off_topic_words else None
+
+    def reason(self, review: CleanReview, theme_id: str,
+               theme_tokens: set[str] | frozenset[str] = frozenset()) -> str | None:
+        label = self.cluster.assignments.get(review.id)
+        if label is None or label.theme_id != theme_id:
+            return "not assigned to the theme"
+        if label.secondary_theme_id:
+            return f"as close to the {label.secondary_theme_id} centre as to its own"
+        text = review.canonical_text
+        if self.off_topic is not None and (m := self.off_topic.search(text)):
+            return f"mentions an off-topic subject ({m.group(0).lower()})"
+        words = _tokens(text)
+        own = len(words & self.entries.get(theme_id, frozenset(theme_tokens)))
+        if own == 0:
+            return "matches none of the theme's keywords"
+        rival = max(((len(words & t), eid) for eid, t in self.entries.items() if eid != theme_id),
+                    default=(0, ""))
+        if rival[0] > own:
+            return f"mainly about {rival[1]} ({rival[0]} keywords vs {own})"
+        return None
+
+
 @dataclass
 class ScoredCandidate:
     review: CleanReview
@@ -139,11 +187,14 @@ class ScoredCandidate:
 
 
 def score_candidates(ctx: ThemeContext, cluster: ClusterResult, keyword_tokens: set[str],
-                     names: NameFilter, *, min_words: int, max_words: int) -> list[ScoredCandidate]:
+                     names: NameFilter, *, min_words: int, max_words: int,
+                     fit: QuoteFit | None = None) -> list[ScoredCandidate]:
     prefer_negative = ctx.stats.negative_share >= 0.5
     out = []
     for r in ctx.candidates:
         if names.names_person(r.canonical_text):
+            continue
+        if fit is not None and fit.reason(r, ctx.id, keyword_tokens) is not None:
             continue
         window = best_window(r, keyword_tokens, min_words=min_words, max_words=max_words)
         if window is None:
@@ -168,7 +219,10 @@ def _templates(catalogue: Catalogue, theme_id: str) -> Templates:
 
 
 def write_from_templates(contexts: Sequence[ThemeContext], cluster: ClusterResult,
-                         catalogue: Catalogue, *, short: bool) -> PulseWriting:
+                         catalogue: Catalogue, *, short: bool,
+                         short_actions: bool | None = None) -> PulseWriting:
+    """`short` picks the short summaries; `short_actions` the short actions (default: same)."""
+    short_actions = short if short_actions is None else short_actions
     summaries, actions = [], []
     for c in contexts:
         t = _templates(catalogue, c.id)
@@ -180,7 +234,8 @@ def write_from_templates(contexts: Sequence[ThemeContext], cluster: ClusterResul
         summaries.append(ThemeSummary(theme_id=c.id, summary=fill(
             t.summary_short if short else t.summary, kws)))
         actions.append(ActionDraft(theme_id=c.id,
-                                   action=fill(t.action_short if short else t.action, kws, figures),
+                                   action=fill(t.action_short if short_actions else t.action,
+                                               kws, figures),
                                    signal=fill(t.signal, kws, figures)))
     return PulseWriting(summaries=summaries, actions=actions)
 
@@ -202,17 +257,24 @@ def compose_pulse_rules(cluster: ClusterResult, reviews: Sequence[CleanReview],
                                   or cluster.keywords.get(c.id) or []) for t in k.split()}
         for c in contexts
     }
+    # Quote fit: draw each theme's candidates from the members that clearly belong to it.
+    fit = QuoteFit(cluster, catalogue, local.quote_off_topic_words if local else [])
+    fit_counts: dict[str, dict[str, int]] = {}
+    for c in contexts:
+        fitting = [r for r in c.members if fit.reason(r, c.id, theme_tokens[c.id]) is None]
+        c.candidates = select_candidates(fitting, cfg)
+        fit_counts[c.id] = {"members": len(c.members), "fit": len(fitting)}
 
     position = dict.fromkeys((c.id for c in contexts), 0)
-    short = False
+    level = 0   # 0 full; 1 short summaries; 2 short summaries and short actions
     attempts: list[dict[str, Any]] = []
     for attempt in range(MAX_RETRIES + 1):
-        max_words = QUOTE_WORDS[min(attempt, len(QUOTE_WORDS) - 1)] if short else QUOTE_WORDS[0]
+        max_words = QUOTE_WORDS[min(level, len(QUOTE_WORDS) - 1)]
         picks, used, missing = [], set(), []
         for c in contexts:
             ranked = [s for s in score_candidates(c, cluster, theme_tokens[c.id], names,
                                                   min_words=a.quote_min_words,
-                                                  max_words=max_words)
+                                                  max_words=max_words, fit=fit)
                       if s.review.id not in used]
             if not ranked:
                 missing.append(c.id)
@@ -222,17 +284,20 @@ def compose_pulse_rules(cluster: ClusterResult, reviews: Sequence[CleanReview],
             picks.append(QuotePick(theme_id=c.id, review_id=chosen.review.id,
                                    first_sentence=chosen.first, last_sentence=chosen.last))
         quotes, pick_errors = build_quotes(QuotePicks(picks=picks), contexts)
-        writing = write_from_templates(contexts, cluster, catalogue, short=short)
+        writing = write_from_templates(contexts, cluster, catalogue, short=level >= 1,
+                                       short_actions=level >= 2)
         pulse = assemble(cluster, contexts, reviews, quotes, writing)
         report = validate_pulse(pulse, reviews=by_id, assignments=assignments, cfg=cfg)
         for tid in missing:
-            report.add("quote_count", f"theme {tid} has no quotable review that names no one "
-                       f"and fits {a.quote_min_words}–{max_words} words", "quotes")
+            report.add("quote_count", f"theme {tid} has no quotable review that fits the "
+                       f"theme, names no one and has {a.quote_min_words}–{max_words} words",
+                       "quotes")
         for e in pick_errors:
             if not any(e.startswith(f"theme {tid} ") for tid in missing):
                 report.add("quote_count", e, "quotes")
-        attempts.append({"attempt": attempt + 1, "short_templates": short,
-                         "max_quote_words": max_words,
+        attempts.append({"attempt": attempt + 1, "short_templates": level >= 1,
+                         "short_actions": level >= 2,
+                         "max_quote_words": max_words, "quote_fit": fit_counts,
                          "quotes": {q.theme_id: q.review_id for q in quotes},
                          **report.to_dict()})
         if report.ok:
@@ -245,12 +310,12 @@ def compose_pulse_rules(cluster: ClusterResult, reviews: Sequence[CleanReview],
             if any(q.review_id in m or f"theme {q.theme_id} " in m for m in quote_issues):
                 position[q.theme_id] += 1
                 progressed = True
-        # Too many words: shorter quotes and the short templates.
-        if any(i.check == "word_count" for i in report.issues):
-            short = True
+        # Too many words: one step shorter (quotes and summaries, then actions too).
+        if any(i.check == "word_count" for i in report.issues) and level < 2:
+            level += 1
             progressed = True
-        if missing and not short:
-            short = True  # shorter windows may find a quotable sentence
+        if missing and level == 0:
+            level = 1  # shorter windows may find a quotable sentence
             progressed = True
         if not progressed:
             break  # nothing the rules can change (e.g. a structure problem)

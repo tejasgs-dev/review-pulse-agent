@@ -13,7 +13,7 @@ Layout (§7.1):
     1. {label} ({share} of reviews · {neg} 1–2★) — {summary}
     ...
     What Users Said
-    • “{quote}” (★{rating}, {store})
+    • {label}: “{quote}” (★{rating}, {store})   ← the theme the quote illustrates
     ...
     Action Ideas
     1. {label}: {action} Watch for: {signal}
@@ -108,11 +108,13 @@ def _sentence(text: str) -> str:
     return text if not text or text[-1] in ".!?" else text + "."
 
 
-def render_quote(q: Quote) -> str:
-    """Typographic quote marks around the unchanged quote text (CMP-17)."""
+def render_quote(q: Quote, label: str | None = None) -> str:
+    """Typographic quote marks around the unchanged quote text (CMP-17), led by the label of
+    the theme the quote illustrates, so readers can tell which theme each quote belongs to."""
     store = SOURCE_LABELS.get(q.source, q.source)
     meta = f"★{q.rating}, {store}" if store else f"★{q.rating}"
-    return f"• “{_one_line(q.text)}” ({meta})"
+    lead = f"{label}: " if label else ""
+    return f"• {lead}“{_one_line(q.text)}” ({meta})"
 
 
 def render_body(pulse: Pulse) -> str:
@@ -123,7 +125,7 @@ def render_body(pulse: Pulse) -> str:
         stats = f"{format_share(t.volume_share)} of reviews · {format_share(t.negative_share)} 1–2★"
         lines.append(f"{i}. {t.label} ({stats}) — {_sentence(t.summary)}")
     lines += ["", HEADINGS[1]]
-    lines += [render_quote(q) for q in pulse.quotes]
+    lines += [render_quote(q, labels.get(q.theme_id, q.theme_id)) for q in pulse.quotes]
     lines += ["", HEADINGS[2]]
     for i, a in enumerate(pulse.actions, start=1):
         area = labels.get(a.theme_id, a.theme_id)

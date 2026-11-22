@@ -98,3 +98,37 @@ def test_config_requires_local_section_for_local_engine(tmp_config):
     path = tmp_config(lambda d: d["analysis"].pop("local"))
     with pytest.raises(ConfigError, match="analysis.local is required"):
         load_config(path, load_env_file=False)
+
+
+# ------------------------------------------------- one time period in actions (regression)
+# W46 action 2 read "the 184 portfolio reviews (rising) ... fewer than 42 ... in the next two
+# weeks": the whole window mixed with the last two weeks. Actions and signals now use only
+# the last 14 days.
+
+
+@pytest.mark.parametrize("field", ["action", "action_short", "signal"])
+@pytest.mark.parametrize("placeholder", ["{count}", "{share}", "{negative_share}"])
+def test_whole_window_figures_are_rejected_in_actions_and_signals(raw, field, placeholder):
+    bad = copy.deepcopy(raw)
+    bad["themes"][0][field] = f"Fix the {placeholder} {{kw1}} cases"
+    with pytest.raises(ValueError, match="unknown placeholders"):
+        Catalogue.model_validate(bad)
+    generic = copy.deepcopy(raw)
+    generic["generic"][field] = f"Fix the {placeholder} {{kw1}} cases"
+    with pytest.raises(ValueError, match="unknown placeholders"):
+        Catalogue.model_validate(generic)
+
+
+def test_every_action_and_signal_uses_the_same_two_week_period(cfg):
+    cat = load_catalogue(cfg.analysis.catalogue_path)
+    whole_window, recent = 184, 42        # the W46 stocks & portfolio figures
+    figures = Figures(count=whole_window, recent_count=recent, share="14%",
+                      negative_share="45%", trend="rising")
+    for t in [cat.generic, *cat.themes]:
+        action = fill(t.action, ["trading"], figures)
+        signal = fill(t.signal, ["trading"], figures)
+        for text in (action, fill(t.action_short, ["trading"], figures), signal):
+            assert str(whole_window) not in text and "14%" not in text and "45%" not in text
+        short = fill(t.action_short, ["trading"], figures)
+        for text in (action, short, signal):   # the short form keeps the same period too
+            assert str(recent) in text and "two weeks" in text, (t, text)

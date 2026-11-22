@@ -6,22 +6,20 @@
 #
 # Template placeholders (filled in by code, never typed as numbers here):
 #   {kw1} {kw2} {kw3}   the theme's top keywords this week (allowed everywhere)
-#   {count}             theme reviews in the whole review window (8–12 weeks), e.g. "245";
-#                       never call it "this week's"
-#   {recent_count}      theme reviews in the last 14 days
-#   {share}             share of all reviews, e.g. "18%"
-#   {negative_share}    share of the theme's reviews rated 1–2★, e.g. "91%"
+#   {recent_count}      theme reviews in the last 14 days (actions and signals only)
 #   {trend}             "rising", "steady" or "easing" (last 14 days vs the window)
 # Summaries may only use {kw1}-{kw3}: the renderer already prints the share and the 1–2★ share
 # next to them, and the validator rejects statistics in summaries (edge case CMP-22).
-# Actions and signals may use the figures, so they change from week to week.
+# Actions and signals use one period only, the last two weeks, so the figure in the action
+# and the target in the signal always describe the same span. Whole-window figures
+# ({count}, {share}, {negative_share}) are rejected in them when the catalogue loads.
 # Keep templates short: the whole pulse must stay within 250 words.
 
 generic:
   summary: "Reviewers often mention {kw1}, {kw2} and {kw3}"
   summary_short: "Reviewers often mention {kw1} and {kw2}"
-  action: "Review the {count} reviews mentioning {kw1} ({trend}) with the owning team and fix the most common problem"
-  action_short: "Fix the most common {kw1} problem with the owning team"
+  action: "Review the {recent_count} reviews mentioning {kw1} from the last two weeks ({trend}) with the owning team and fix the most common problem"
+  action_short: "Fix the top {kw1} problem in the {recent_count} reviews from the last two weeks"
   signal: "fewer than {recent_count} reviews mentioning {kw1} in the next two weeks"
 
 themes:
@@ -33,7 +31,7 @@ themes:
     summary: "Reviewers struggle to get a reply or a fix, often about {kw1} and {kw2}"
     summary_short: "Reviewers struggle to get a reply or a fix"
     action: "Audit the {recent_count} support complaints from the last two weeks and give each one an owner and a reply deadline"
-    action_short: "Give every open support case an owner and a reply deadline"
+    action_short: "Give each of the {recent_count} support complaints from the last two weeks an owner"
     signal: "fewer than {recent_count} support complaints in the next two weeks"
 
   - id: charges
@@ -43,8 +41,8 @@ themes:
                expensive, cost]
     summary: "Reviewers find charges high or unclear, especially {kw1} and {kw2}"
     summary_short: "Reviewers find charges high or unclear"
-    action: "Show a per-order charge breakdown before confirmation, starting with the {kw1} cases among the {count} charge reviews"
-    action_short: "Show a per-order charge breakdown before confirmation"
+    action: "Show a per-order charge breakdown before confirmation, starting with the {kw1} cases among the {recent_count} charge reviews from the last two weeks"
+    action_short: "Show a per-order charge breakdown; check it against the {recent_count} charge reviews from the last two weeks"
     signal: "fewer than {recent_count} charge complaints in the next two weeks"
 
   - id: performance_bugs
@@ -55,7 +53,7 @@ themes:
     summary: "Reviewers hit errors, crashes or broken screens, often around {kw1} and {kw2}"
     summary_short: "Reviewers hit errors, crashes or broken screens"
     action: "Triage the {recent_count} bug reports from the last two weeks and ship a fix for the most common one in the next release"
-    action_short: "Triage recent {kw1} bug reports and ship a fix"
+    action_short: "Fix the top cause of the {recent_count} bug reports from the last two weeks"
     signal: "fewer than {recent_count} bug reports in the next two weeks"
 
   - id: feature_requests
@@ -65,9 +63,9 @@ themes:
                full screen, watchlist, request, provide, want, display]
     summary: "Reviewers ask for missing options, most often {kw1} and {kw2}"
     summary_short: "Reviewers ask for missing options"
-    action: "Rank the {count} feature requests ({recent_count} recent) and scope the most asked-for one, {kw1}, for the roadmap"
-    action_short: "Scope the most requested feature, {kw1}, for the roadmap"
-    signal: "fewer repeat requests for {kw1}"
+    action: "Rank the {recent_count} feature requests from the last two weeks and scope the most asked-for one, {kw1}, for the roadmap"
+    action_short: "Scope {kw1}, the top ask in the {recent_count} feature requests from the last two weeks"
+    signal: "fewer than {recent_count} feature requests in the next two weeks"
 
   - id: trading_tools
     label: Charts & trading tools
@@ -76,8 +74,8 @@ themes:
                timeframe, intraday, gtt, alert]
     summary: "Traders report problems with {kw1} and {kw2}"
     summary_short: "Traders report problems with charts and trading tools"
-    action: "Reproduce the top {kw1} problems from the {count} reviews with the trading team and fix the most reported one"
-    action_short: "Fix the most reported {kw1} problem"
+    action: "Reproduce the top {kw1} problems in the {recent_count} reviews from the last two weeks with the trading team and fix the most reported one"
+    action_short: "Fix the top {kw1} problem in the {recent_count} reviews from the last two weeks"
     signal: "fewer than {recent_count} chart and trading-tool complaints in the next two weeks"
 
   - id: order_execution
@@ -87,8 +85,8 @@ themes:
                target, market open, sell order, buy order]
     summary: "Reviewers blame delayed or failed orders for losses, often around {kw1}"
     summary_short: "Reviewers blame delayed or failed orders for losses"
-    action: "Check order logs behind the {recent_count} recent {kw1} complaints and publish the cause and the fix"
-    action_short: "Publish the cause and fix of recent {kw1} order failures"
+    action: "Check order logs behind the {recent_count} {kw1} complaints from the last two weeks and publish the cause and the fix"
+    action_short: "Publish the cause of the {recent_count} order complaints from the last two weeks"
     signal: "fewer than {recent_count} order-failure complaints in the next two weeks"
 
   - id: withdrawals
@@ -98,8 +96,8 @@ themes:
                money, days, stuck, received]
     summary: "Reviewers wait too long for money to reach their bank, often {kw1}"
     summary_short: "Reviewers wait too long for money to reach their bank"
-    action: "Show an expected credit date on every pending payout and clear the oldest of the {count} reported cases first"
-    action_short: "Show an expected credit date on every pending payout"
+    action: "Show an expected credit date on every pending payout and clear the oldest of the {recent_count} cases from the last two weeks first"
+    action_short: "Show a credit date on every payout; start with the {recent_count} cases from the last two weeks"
     signal: "fewer than {recent_count} reviews about stuck money in the next two weeks"
 
   - id: payments
@@ -108,8 +106,8 @@ themes:
                recharge, wallet, transfer, failed, gateway, net banking, debit]
     summary: "Reviewers have trouble adding money, often with {kw1} and {kw2}"
     summary_short: "Reviewers have trouble adding money"
-    action: "Trace the failed {kw1} payments behind the {count} payment reviews and fix the most common failure"
-    action_short: "Fix the most common {kw1} payment failure"
+    action: "Trace the failed {kw1} payments behind the {recent_count} payment reviews from the last two weeks and fix the most common failure"
+    action_short: "Fix the top {kw1} failure in the {recent_count} payment reviews from the last two weeks"
     signal: "fewer than {recent_count} payment complaints in the next two weeks"
 
   - id: onboarding_kyc
@@ -119,8 +117,8 @@ themes:
                activation, nominee, re kyc]
     summary: "Reviewers get stuck opening or verifying an account, often at {kw1}"
     summary_short: "Reviewers get stuck opening or verifying an account"
-    action: "Replace generic {kw1} rejection messages with the exact fix needed, starting with the {count} reviewed cases"
-    action_short: "Replace generic {kw1} rejections with the exact fix needed"
+    action: "Replace generic {kw1} rejection messages with the exact fix needed, starting with the {recent_count} cases from the last two weeks"
+    action_short: "Explain each {kw1} rejection, starting with the {recent_count} cases from the last two weeks"
     signal: "fewer than {recent_count} KYC complaints in the next two weeks"
 
   - id: stocks_portfolio
@@ -129,8 +127,8 @@ themes:
                holdings, investment, investing, invest, returns, profit, trading, trade]
     summary: "Reviews about buying, selling and tracking stocks, often {kw1} and {kw2}"
     summary_short: "Reviews about buying, selling and tracking stocks"
-    action: "Find the most common {kw1} complaint in the {count} portfolio reviews ({trend}) and fix or explain it in the app"
-    action_short: "Fix or explain the most common {kw1} complaint in the app"
+    action: "Find the most common {kw1} complaint in the {recent_count} portfolio reviews from the last two weeks ({trend}) and fix or explain it in the app"
+    action_short: "Fix the top {kw1} complaint in the {recent_count} portfolio reviews from the last two weeks"
     signal: "fewer than {recent_count} portfolio complaints in the next two weeks"
 
   - id: mutual_funds
@@ -139,8 +137,8 @@ themes:
                apply, applied, fund, funds, redemption, scheme, elss]
     summary: "Reviewers raise problems with {kw1} and {kw2}"
     summary_short: "Reviewers raise problems with IPOs and mutual funds"
-    action: "Walk through the {kw1} journey behind the {count} reviews and fix the step where most users fail"
-    action_short: "Fix the step where most {kw1} users fail"
+    action: "Walk through the {kw1} journey behind the {recent_count} reviews from the last two weeks and fix the step where most users fail"
+    action_short: "Fix the failing {kw1} step in the {recent_count} reviews from the last two weeks"
     signal: "fewer than {recent_count} IPO and fund complaints in the next two weeks"
 
   - id: statements_tax
@@ -149,6 +147,6 @@ themes:
                capital gain, capital gains, ledger, download, invoice, itr]
     summary: "Reviewers cannot find or trust their {kw1} and {kw2}"
     summary_short: "Reviewers cannot find or trust their statements"
-    action: "Make the {kw1} report downloadable from one place and check it against the {count} reviews"
-    action_short: "Make the {kw1} report downloadable from one place"
+    action: "Make the {kw1} report downloadable from one place and check it against the {recent_count} reviews from the last two weeks"
+    action_short: "Fix the {kw1} report issues in the {recent_count} reviews from the last two weeks"
     signal: "fewer than {recent_count} statement complaints in the next two weeks"

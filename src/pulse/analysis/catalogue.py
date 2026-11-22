@@ -18,6 +18,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 KEYWORD_FIELDS = frozenset({"kw1", "kw2", "kw3"})
 FIGURE_FIELDS = frozenset({"count", "recent_count", "share", "negative_share", "trend"})
+# Actions and signals use ONE period, the last 14 days: `{recent_count}` and the `{trend}` word
+# (which already compares the 14 days with the window). Whole-window figures (`{count}`,
+# `{share}`, `{negative_share}`) are rejected there, so an action can never mix "184 reviews"
+# over 10 weeks with "fewer than 42 in the next two weeks".
+ACTION_FIELDS = frozenset({"recent_count", "trend"})
 _ID = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
 
 
@@ -61,7 +66,7 @@ class Templates(BaseModel):
     @field_validator("action", "action_short", "signal")
     @classmethod
     def _action(cls, v: str) -> str:
-        return _check(v, KEYWORD_FIELDS | FIGURE_FIELDS, "action/signal")
+        return _check(v, KEYWORD_FIELDS | ACTION_FIELDS, "action/signal")
 
 
 class Entry(Templates):

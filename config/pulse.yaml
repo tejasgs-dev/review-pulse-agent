@@ -79,6 +79,13 @@ analysis:
     vague_words: [worst, bad, useless, experience, poor, waste, install, uninstall, rating,
                   star, thank, thanks, lost, fraud, hai, bhi, ho, rha, ke, par, hindi, nahi,
                   kya, mai, hain, se, ka, ki]
+    # A review that mentions any of these is never quoted: the subject belongs to no theme,
+    # so the quote would be off-topic even when the review shares a keyword with the theme.
+    quote_off_topic_words: [spam, spammed, spamming, privacy, contact details, contact number,
+                            phone number, personal data, personal details, personal information,
+                            data leak, leaked, leaking, selling data, sold my data, hacked,
+                            hacker, telemarketing, marketing calls, promotional calls,
+                            unwanted calls, cold calls]
     # Capitalized words that are never taken for a person's name in quotes (PII-11).
     name_allowlist: [Groww, UPI, IPO, IPOs, SIP, SIPs, NSE, BSE, Nifty, Sensex, Bank, India,
                      Indian, Android, iPhone, iPad, iOS, Google, Play, Store, App, Apple,

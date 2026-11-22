@@ -21,7 +21,7 @@ def test_valid_pulse_passes(cfg):
     report = check(valid_pulse(), cfg)
     assert report.ok, report.issues
     assert report.to_dict()["checks"] == dict.fromkeys(CHECKS, "pass")
-    assert report.word_count == 180
+    assert report.word_count == 186   # 180 + the theme label before each quote
 
 
 # ------------------------------------------------------------- the plan's five bad pulses

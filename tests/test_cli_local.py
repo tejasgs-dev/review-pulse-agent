@@ -33,7 +33,8 @@ def test_dry_run_with_local_engine(tmp_config, tmp_path, monkeypatch):
     assert "local engine" in result.output and "no API calls" in result.output
     week = tmp_path / "runs" / "2026-W46"
     md = (week / "pulse.md").read_text(encoding="utf-8")
-    assert md.count("• “") == 3 and "Action Ideas" in md
+    assert sum(x.startswith("• ") and ": “" in x for x in md.splitlines()) == 3
+    assert "Action Ideas" in md
     assert "general praise" in md.splitlines()[1]
     # Actions carry this week's figures.
     actions = md.split("Action Ideas", 1)[1]
