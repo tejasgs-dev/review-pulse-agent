@@ -6,7 +6,7 @@
 
 ## Overview
 
-The work is split into **8 phases**. Each phase leaves the project runnable and ends with explicit exit criteria. The order front-loads the parts that need no external access (ingestion, privacy, analysis), so a complete **offline pulse** (`pulse run --dry-run`) works before any Google integration is attempted.
+The work is split into **8 phases**. Each phase leaves the project runnable and ends with explicit exit criteria. The order front-loads the parts that need no external access (ingestion, privacy, analysis), so a complete **offline pulse** (`pulse run --dry-run`) works before any Google integration is attempted. Analysis uses **local machine learning and rules by default, with no paid API** (revised 2026-11-22; the Claude API is an optional engine, `--engine llm`).
 
 ```
 Phase 0 ──▶ Phase 1 ──▶ Phase 2 ──▶ Phase 3 ──▶ Phase 4 ──▶ Phase 5 ──▶ Phase 6 ──▶ Phase 7
@@ -140,146 +140,201 @@ Phases 1 and 2 can run in parallel once the Phase 0 data models exist. Phase 5 c
 
 ---
 
-## Phase 3: Theme Clustering and Ranking
+## Phase 3: Theme Clustering and Ranking (local ML, no paid API)
 
-**Goal:** at most 5 themes that fit the data, with every review assigned and the top 3 ranked in code. *(§4.4)*
+**Goal:** at most 5 themes that fit the data, with every review assigned and the top 3 ranked in code, using **local machine learning only**. No review text leaves the machine and no paid API is called. *(§4.4)*
 
-### Data profile (2026-W46, `runs/2026-W46/clean_reviews.jsonl`)
+> **Revised 2026-11-22.** The first version of this phase used the Claude API (two LLM passes). That code is kept as an optional engine (`--engine llm`, off by default; see "Engines" below). The default engine is local and free. All numbers in this section were **measured on `runs/2026-W46/clean_reviews.jsonl`** on the development machine (Windows, CPU only) unless marked as an estimate.
 
-What the real input looks like, because it drives the choices below:
+### Data profile (2026-W46)
 
 | Property | Value | Consequence for clustering |
 |---|---|---|
-| Volume | 1,348 reviews (Play Store 1,202 · App Store 146), 7 Sep – 15 Nov | Small. The whole set fits in one request |
-| Length | median 22 words, p90 68, max 239; about 41k words in total (≈80k input tokens with IDs, ratings, dates) | Pass A sees **every** review; no sampling needed |
-| Ratings | 1★ 43% · 2★ 6% · 3★ 7% · 4★ 9% · 5★ 35%; 49% are 1–2★ | Strongly bimodal. Negative share separates themes well |
-| Recency | 245 reviews in the last 14 days | Enough for a recency signal on the large themes, but noisy for small ones |
-| Topic mix (keyword probe, overlapping, rough) | trading/F&O/charts ~22%, support ~17%, bugs/lag ~15%, charges ~12%, losses/fraud/trust ~10%, MF/SIP ~7%; KYC, payments, withdrawals, tax/statements ~3–4% each | 8 seed themes for 5 slots: the small seeds have to merge or fall to `other` |
-| Generic praise | ~19% are 4–5★ with no specific topic ("very good app, easy to use") | Needs its own bucket (see S3), or it either takes a theme slot or inflates `other` |
-| Multi-topic reviews | common: "app hung → order delayed → loss → support didn't reply" | Needs a primary-label rule (see S4) |
-| Rating vs. text | some 5★ reviews are complaints or feature requests ("pls change the UPI method…") | Rating alone is not sentiment; the model reads the text |
+| Volume | 1,348 reviews (Play Store 1,202 · App Store 146), 7 Sep – 15 Nov | Small: any method runs in seconds on a CPU |
+| Length | median 22 words, p90 68, max 239 | Short texts: bag-of-words vectors are sparse, so embeddings help |
+| Ratings | 1★ 43% · 2★ 6% · 3★ 7% · 4★ 9% · 5★ 35%; 49% are 1–2★ | Negative share separates themes well (used by `rank.py`) |
+| Recency | 245 reviews in the last 14 days | Enough for the recency weight on large themes |
+| Generic praise | 233 reviews (17%) match the praise rule below; one more micro-cluster of vague praise brings it to about 24% | Must be taken out **before** clustering, or it forms its own "theme" |
+| Vague complaints | about 70 reviews of "worst app, useless, waste of money" with no product area | Becomes an `other` micro-cluster, not a theme |
+| Hinglish leftovers | about 50 reviews that passed the English filter but are mostly romanized Hindi | Forms its own micro-cluster; routed to `other` |
+| Multi-topic reviews | common ("app hung → order delayed → loss → support didn't reply") | One primary theme per review; the second-nearest theme is recorded as secondary |
 
-### Clustering strategy
+### Method comparison
 
-**S1. LLM clustering in two passes, not embeddings.** Embeddings plus k-means/HDBSCAN was considered and rejected: it needs another model provider and dependencies, its clusters have no labels or inclusion criteria (an LLM would still have to name them), and it splits short reviews by wording rather than by the issue. At about 1,350 short reviews the model can read the whole set in one request. Revisit only if the cleaned volume goes above about 20k reviews per window.
+The three candidate approaches (TF-IDF + k-means, sentence embeddings + k-means, BERTopic), with sentence embeddings tried two ways: MiniLM on torch, and model2vec, a lighter static model. Quality for A and C is from clustering the non-praise reviews directly; B1 and B2 also ran through the full pipeline below (L1–L8), which is where B2's five themes come from.
 
-**S2. Pass A (discovery) reads the full set.**
-- Input: one line per review, `r0001 | 1★ | 2026-09-07 | <canonical_text>`. Shuffle with a seed derived from the ISO week, so the date order does not bias the model and the run can be reproduced. Above `analysis.max_discovery_reviews` (3,000), take a stratified sample by rating band (1–2★ / 3★ / 4–5★) × week.
-- Context in the prompt: what Groww is (stocks, F&O, mutual funds, IPOs in India) and the 8 seed themes from config. Themes are discovered again each week, so IDs can change between weeks. Keeping them stable is deferred to Phase 8 (week-over-week trend).
-- Granularity rules in the prompt:
-  - A theme is a **product area or problem type that one team could own**: not a sentiment ("bad experience") and not a catch-all ("app issues").
-  - Merge small related seeds instead of dropping them. Likely merge on this data: payments, withdrawals and redemption delays into one money-movement theme. The model decides.
-  - A theme should hold at least ~3% of reviews. Smaller topics go to `other`.
-- Output (structured, `messages.parse()`): **at most 5** themes, each `{id (snake_case), label (≤ 4 words, shown in the pulse), description, include, exclude, example_ids (3 review IDs)}`, plus `taxonomy_changes` listing what was merged, renamed or dropped compared with the seeds. Code checks that `example_ids` exist. Effort: `high`.
+| | **A. TF-IDF + k-means** | **B1. Sentence embeddings (MiniLM, torch) + k-means** | **B2. Static sentence embeddings (model2vec) + k-means** | **C. BERTopic (MiniLM + UMAP + HDBSCAN)** |
+|---|---|---|---|---|
+| Theme quality on W46 | Poor. k=5 leaves one catch-all cluster of 57%; the clean clusters it finds are support, charges, charts, mutual funds | Fair. Very stable, but groups reviews by **tone** more than by product area: three of five clusters read as "customer support" | **Best of the four.** Five distinct product themes: customer support (17% of reviews, 94% 1–2★), stocks & portfolio, bugs & updates, feature requests (charts, options), charges & brokerage (10%); `other` 9% | Unusable here: HDBSCAN finds one topic holding 97% of reviews plus a 3% Hinglish cluster, with `min_cluster_size` 20 or 10. More topics means swapping HDBSCAN for k-means, which is option B with extra weight |
+| Silhouette (cosine), k=5, all non-praise reviews | 0.019 | 0.090 | 0.058 | n/a (density-based) |
+| Stability: ARI vs 3 other seeds, k=5 | 0.35 | 0.93 | 0.54 with `n_init=10`; 0.75 with `n_init=50`; median 0.79 in the full pipeline | 1.00 between two runs, trivially (one topic) |
+| Extra install size (measured, Windows) | scikit-learn + scipy ≈ 160 MB | torch CPU 552 MB + transformers 124 MB + model 88 MB ≈ **1.1 GB** total env | scikit-learn + model2vec ≈ 200 MB + model **30 MB** | MiniLM stack + umap, hdbscan, numba, plotly ≈ **1.4 GB** total env |
+| Run time, this machine (1,115 reviews to cluster) | 0.4 s per k | model load 24 s (first run, includes download) + encode 10.7 s | model load 0.8 s + encode 0.1–0.7 s; whole pipeline 2.5 s | ≈ 32 s: model load 7 s + encode 11 s + fit 14 s (the first fit includes numba compilation; 2.5 s after that) |
+| GitHub Actions, `ubuntu-latest` *(estimate)* | ≈ 20 s install, < 5 s run | ≈ 1.5–2 min install (CPU torch wheel), ≈ 20–40 s run | ≈ 20 s install, model from cache, < 10 s run | ≈ 2–2.5 min install, ≈ 40–60 s run (numba compiles again on every fresh runner) |
+| Determinism with a fixed seed | Yes (`random_state`), but results change a lot between seeds | Yes: re-encoding is bit-identical; k-means seeded | **Yes: identical assignment hashes across two separate processes**; re-encoding bit-identical | Yes with `UMAP(random_state=42)` (UMAP then runs single-threaded): identical across two runs |
+| Labels | Centroid top terms | c-TF-IDF top terms | c-TF-IDF top terms | c-TF-IDF top terms (built in) |
 
-**S3. Two reserved buckets that are not themes.** `general_praise` (positive, nothing specific to act on) and `other` (specific, but outside the taxonomy). Neither counts toward the 5-theme limit, neither is ranked, and only `other` counts toward the 25% re-discovery rule. Without `general_praise`, about a fifth of the data would either become a top-3 theme nobody can act on or push `other` past 25% every week. The `general_praise` share is shown in the pulse source line (e.g. "19% general praise", Phase 4), so the pulse isn't read as all negative.
+**Recommendation: B2, static sentence embeddings (model2vec `minishlab/potion-base-8M`) + k-means, inside the routing pipeline below.**
+- It produced the clearest product themes on the real data. MiniLM is more stable, but it splits by tone, and a pulse needs product areas.
+- It needs no torch: about 200 MB of dependencies plus a 30 MB model, a CI install in seconds, and a full run in a few seconds.
+- It is deterministic: a fixed seed gives byte-identical assignments across runs.
+- It runs on any CPU, offline after the first model download, and no review text leaves the machine.
 
-**S4. Pass B (assignment): one primary theme per review.**
-- Batches of at most `analysis.assign_batch_size` (500), balanced in size (W46: 3 batches of about 450), run concurrently (at most 3 at once). The system prompt and theme definitions form a fixed prefix with `cache_control`; only the review batch changes. Effort: `medium`.
-- Output per review: `{review_id, theme_id | general_praise | other, secondary_theme_id?, sentiment: positive|neutral|negative|mixed}`.
-- **Primary-label rule:** the primary theme is the main thing the reviewer wants fixed; when that is unclear, choose the root cause over its consequence. "The app hung and I lost money" goes to performance, not losses. "Support never replied" goes to support only when support is the main complaint; otherwise it goes in `secondary_theme_id`. Ranking uses the primary theme only, so shares add up to 100%. Secondary counts are reported in `themes.json`.
-- Code checks: every input ID appears exactly once; unknown theme IDs and IDs outside the batch are rejected; missing IDs are re-requested in a small follow-up batch (at most 2 retries), after which the stage fails with `failure.json`.
+TF-IDF + k-means is too weak on short reviews. BERTopic found no structure in these short reviews and is the heaviest install. Forcing it onto k-means would make it option B with 1.2 GB of extra dependencies.
 
-**S5. Quality checks after assignment (in code, recorded in `themes.json` and the manifest).**
-- `other` above 25%: re-run Pass A once, with up to 50 `other` reviews as examples, then run Pass B again.
-- A theme under 3%: flag it (`small_theme` warning). It can still be ranked.
-- **Consistency probe:** assign a random 100 reviews a second time, in a separate call with a different order, and record the agreement rate. Below 85% is a warning: it usually means two themes overlap and their `include`/`exclude` rules need tightening. This is a cheap automated check alongside the human spot check.
-- Rating vs. sentiment disagreements (for example, 4–5★ marked negative) are counted, for diagnosis only.
+### Pipeline (engine `local`)
 
-**S6. Ranking (`rank.py`, pure and deterministic).** Only the clustered themes are ranked (not `general_praise` or `other`).
-```
-volume_share   = theme reviews / all reviews in the window
-negative_share = theme reviews rated 1–2★ / theme reviews          # rating, not LLM sentiment: deterministic
-recency_weight = clamp(share_last_14d / volume_share, 0.5, 2.0)    # 1.0 if the theme has < 5 reviews in the last 14 days
-score          = volume_share × (1 + negative_share) × recency_weight
-```
-Ties are broken by the count of negative reviews, then by `id`. Themes with no reviews score 0 and are never selected. Fewer than 3 rankable themes with reviews fails the stage, because the pulse needs exactly 3.
+**L1. General praise first (rule, before clustering).** A review is `general_praise` when it is rated 4–5★, contains a praise word (`good`, `great`, `best`, `easy`, `smooth`, `love`, …), and contains none of the "specific" words (`but`, `please`, `issue`, `fix`, `add`, `not`, `slow`, `charges`, `support`, `withdraw`, …). Both word lists live in config. On W46 this takes 233 reviews (17%).
+
+**L2. Embed.** Sort reviews by ID, embed `canonical_text` with model2vec, and L2-normalize. The model is pinned by repo and revision (`analysis.local.model`, `analysis.local.model_revision`) and cached in `data/models/` (git-ignored). The first run downloads it from Hugging Face (free, no account, about 30 MB); later runs work offline.
+
+**L3. Micro-clusters.** k-means with `k0 = 12` (`analysis.local.micro_clusters`), `n_init = 50`, `random_state = 42`. On W46 the 12 micro-clusters are coherent: app bugs and updates, money stuck at the bank, order execution and stop-loss losses, customer support (96% 1–2★), stocks and portfolio, charts and indicators, charges and brokerage, IPO and misc, plus leftover praise, vague complaints and Hinglish.
+
+**L4. Route micro-clusters to the reserved buckets.** Keywords per micro-cluster come from **c-TF-IDF** (class-based TF-IDF, as BERTopic uses, built with scikit-learn's `CountVectorizer`).
+- `general_praise`: under 25% of the micro-cluster is rated 1–2★ and more than half of it is 4–5★ with a praise word.
+- `other`: at least 3 of its top 5 keywords are on the "vague" list (`worst`, `bad`, `useless`, `experience`, `waste`, …, plus common Hinglish words), or the cluster is loose (median cosine to its centroid under 0.55).
+- Everything else is a theme micro-cluster. On W46: 9 theme, 2 `other`, 1 `general_praise`.
+
+**L5. Choose the number of themes (at most 5) and cluster.** Run k-means again on the theme reviews only, for k = 5, 4, 3 (`n_init = 50`, `random_state = 42`). Keep the **largest k** for which both hold:
+1. every cluster holds at least `min_theme_share` (3%) of all reviews;
+2. the clustering is stable: the median ARI between seed 42 and seeds 1, 2, 3 is at least 0.75.
+
+Silhouette is not used to choose k: on this data it is low and nearly flat for every k (0.02–0.09), so it cannot tell k values apart. On W46 the rule picks **k = 5** (median ARI 0.79, smallest theme 9.6%). k = 3 is the floor; if even k = 3 fails, the stage stops with a clear error, as today (`RankError`).
+
+**L6. Per-review `other` and secondary theme.** A theme review whose cosine similarity to its own centroid is under 0.40 moves to `other`. The second-nearest theme centroid becomes `secondary_theme_id` when it is within 0.05 of the nearest. On W46 `other` ends at 9%. If `other` is above `max_other_share` (25%), the stage retries once with `k0 = 16`, then records `other_share_high` as today.
+
+**L7. Label each theme from its keywords.**
+1. Take the theme's top c-TF-IDF keywords (unigrams and bigrams, English and domain stop words removed).
+2. Match them against the **theme catalogue** `config/themes.yaml`: each entry has an `id`, a `label` of at most 4 words, a keyword list, and the Phase 4 templates. The entry that shares the most of the top 6 keywords wins, with at least 2 shared.
+3. With no match, the label is the top two keywords, title-cased ("Chart & Indicator"), and the ID is their snake_case (`kw_chart_indicator`).
+4. Two themes that map to the same catalogue entry are merged.
+
+The catalogue starts from the 8 seed themes plus what W46 showed (order execution & losses, stocks & portfolio, feature requests, IPO & mutual funds). Unmatched labels in a run are a signal to extend it. `description` = "Reviews mentioning {top keywords}", and `include` / `exclude` hold the matched keywords.
+
+**L8. Quality checks** (recorded in `themes.json` and the manifest, as today):
+- the stability ARI from L5 replaces the LLM consistency probe (warning below 0.75);
+- `small_theme` and `other_share_high` warnings are unchanged;
+- the rating/sentiment mismatch count is dropped, since the local engine has no sentiment (`sentiment` is `null` in assignments).
+
+**Kept unchanged:** `rank.py` (the ranking formula in architecture §4.4, tie-breaks, `RankError`), the `general_praise` / `other` reserved buckets and their meaning, the `themes.json` schema (with `sentiment: null`), the PII rules (only `canonical_text` is used), and `validate.py`.
+
+### Engines
+
+| `analysis.engine` | Clustering | Composing | Needs |
+|---|---|---|---|
+| `local` *(default)* | Pipeline L1–L8 above | Rules and templates (Phase 4) | scikit-learn, model2vec; no API key |
+| `llm` *(optional)* | The current two-pass Claude design (Pass A discovery, Pass B assignment, consistency probe) | The current LLM quote pick and writing | `pip install -e .[llm]` and `ANTHROPIC_API_KEY`; costs money |
+
+`pulse analyze` and `pulse run` take `--engine local|llm`, overriding config. Both engines return the same `ClusterResult` and `Pulse`, so `rank.py`, the validator, the renderer and the publisher do not know which one ran. The engine and model are recorded in `manifest.json` and `themes.json`.
 
 ### Tasks
-- [x] `analysis/llm.py`: a wrapper around the Anthropic SDK.
-  - [x] Model `claude-opus-5-5`; adaptive thinking; `output_config.effort` set per call.
-  - [x] Structured outputs from pydantic schemas: the schema goes in `output_config.format` (`anthropic.transform_schema`) and the text is validated in code *after* the `stop_reason` check, so a refused or truncated response is reported as such rather than as a parse error. (Used instead of `messages.parse()`, which validates during streaming.)
-  - [x] Streaming plus `.get_final_message()` for large requests.
-  - [x] Server-side `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`), and a `stop_reason` check before reading any content.
-  - [x] Error handling caught most-specific first: `RateLimitError` → `APIStatusError` → `APIConnectionError`.
-  - [x] `cache_control` on the stable system prompt and the theme-definition prefix.
-  - [x] Log scrubbed requests and responses to `runs/{week}/llm/`.
-- [x] `analysis/prompts/`: versioned templates (`cluster_v1.md`, `assign_v1.md`) with the product context, the seed themes from config, the granularity rules (S2), the reserved buckets (S3), and the primary-label rule (S4).
-- [x] Config: add `analysis.max_discovery_reviews` (3000), `analysis.assign_batch_size` (500), `analysis.min_theme_share` (0.03), `analysis.max_other_share` (0.25), `analysis.recency_days` (14), `analysis.consistency_sample` (100), plus `analysis.assign_concurrency` (3) and `analysis.min_agreement` (0.85).
-- [x] `analysis/cluster.py`:
-  - [x] Input formatting and seeded shuffle; stratified sample above `max_discovery_reviews` (S2).
-  - [x] **Pass A (discovery):** 5 or fewer `{id, label, description, include, exclude, example_ids}` plus `taxonomy_changes`.
-  - [x] **Pass B (assignment):** balanced, concurrent batches against the fixed definitions; output `{review_id, theme_id | general_praise | other, secondary_theme_id?, sentiment}`.
-  - [x] Check that every review ID is assigned exactly once. Re-request any that are missing (at most 2 retries).
-  - [x] Quality checks from S5: `other` re-discovery, small-theme flag, consistency probe, rating/sentiment disagreement count.
-- [x] `analysis/rank.py`: the formula and tie-breaks in S6; select the top 3. Pure and deterministic.
-- [x] Write `runs/{week}/themes.json`: taxonomy, `taxonomy_changes`, prompt versions, every assignment, per-theme stats (count, `volume_share`, `negative_share`, last-14-day share, `recency_weight`, score, rank, secondary count), `general_praise` and `other` shares, consistency agreement, and warnings.
-- [x] Wire `pulse analyze` to run up to this stage. Exit codes: 8 (`ANALYSIS_FAILED`, answers still invalid after retries, or fewer than 3 rankable themes), 9 (`LLM_FAILED`: API error, refusal, truncation). Failures are recorded in the manifest's `cluster` section.
-- [x] Tests:
-  - [x] Unit tests for `rank.py`: ties, a theme with no reviews, the recency clamp and the under-5-reviews rule, `general_praise`/`other` excluded, fewer than 3 rankable themes fails.
-  - [x] Schema tests with mocked LLM responses: more than 5 themes is rejected; an unknown theme ID is rejected; a duplicate or missing assignment triggers a re-request; `example_ids` that don't exist are rejected.
-  - [x] Mocked test: an `other` share above 25% triggers exactly one re-discovery.
-  - [x] Shuffle test: the same week gives the same order; a different week gives a different one.
-  - [x] An `@slow` integration test on about 200 synthetic reviews against the real API (run on demand), including multi-topic reviews with a known primary label. *(`tests/test_cluster_live.py`; written, not yet run: needs API credentials.)*
+- [x] *(LLM engine, built first; kept as `--engine llm`)* `analysis/llm.py`, `analysis/prompts/`, two-pass clustering, consistency probe, offline tests with a fake model. **Superseded as the default** by the local engine below.
+- [ ] Dependencies: add `scikit-learn` and `model2vec` (pinned) to the core dependencies; move `anthropic` to an optional extra `[llm]`. `pulse doctor` reports the active engine and checks only what it needs.
+- [ ] Config: `analysis.engine` (default `local`); `analysis.local.{model, model_revision, micro_clusters: 12, n_init: 50, seed: 42, min_stability: 0.75, other_cosine: 0.40, secondary_margin: 0.05, praise_words, specific_words, vague_words}`; `config/themes.yaml` (theme catalogue).
+- [ ] Restructure: move the LLM clustering into `analysis/engines/llm_cluster.py` (no behavior change). Put the shared `ClusterResult`, `themes.json` writer and manifest section in `analysis/cluster.py`, and select the engine in one place.
+- [ ] `analysis/engines/local_cluster.py`: L1–L8. Every step deterministic: sorted input, fixed seeds, `threadpoolctl` limiting BLAS/OpenMP to 1 thread during clustering, ties broken by ID.
+- [ ] Model cache in `data/models/`, offline-safe. A missing model with no network fails clearly and names the config key.
+- [ ] CLI: `--engine local|llm` on `analyze` and `run`.
+- [ ] CI: cache `data/models/` (`actions/cache`, keyed by model revision); keep `OMP_NUM_THREADS=1`.
+- [ ] Tests (offline, no network: a tiny fixture model or a stub embedding function):
+  - [ ] the praise rule: 4–5★ with a praise word and no specific word; "good app but please add X" is not praise;
+  - [ ] micro-cluster routing: a praise cluster, a vague cluster, a loose cluster;
+  - [ ] choosing k: picks the largest stable k; falls back to 4 or 3; stops below 3;
+  - [ ] the per-review `other` threshold and secondary margin;
+  - [ ] labelling: catalogue match, fallback label from keywords, labels of 4 words or fewer, merge of two clusters with the same catalogue entry;
+  - [ ] determinism: two runs on the same input give an identical `themes.json` apart from timestamps;
+  - [ ] the `--engine llm` path still passes its existing offline tests.
+- [ ] Keep `rank.py` and its tests unchanged.
 
 ### Deliverables
-- `themes.json` for 2026-W46, with theme labels, shares, scores, and assignments.
-
-*Status (2026-11-22): code and offline tests done (`pytest`: 331 passed, LLM mocked). The live W46 run, and with it every exit criterion below, is waiting for API credentials (`ANTHROPIC_API_KEY` in `.env` or an `ant auth login` profile).*
+- `themes.json` for 2026-W46 from the local engine, with labels, shares, scores and assignments, and no API call.
 
 ### Exit criteria
 - 5 or fewer themes on real data; 100% of reviews assigned; `other` at 25% or less.
-- A human spot check: 20 random assignments, at least 85% judged correct. Include at least 5 multi-topic reviews, to check the primary-label rule.
-- Consistency probe agreement of at least 85%.
-- The cost (tokens) and latency of one full run are recorded in `manifest.json`.
+- Two runs on the same input produce byte-identical assignments (same OS). CI on Linux produces the same theme labels and top 3.
+- A human spot check: 20 random assignments, at least 85% judged correct, including at least 5 multi-topic reviews. If it falls short, tune the catalogue and word lists before changing the method.
+- `pulse analyze` with the local engine finishes in under 60 seconds on GitHub Actions, with the model cached.
+- The engine, model revision, timings and stability ARI are recorded in `manifest.json`.
 
 ### Risks
 | Risk | Mitigation |
 |---|---|
-| Themes are too broad, such as "app issues" | Granularity rules plus `include`/`exclude` criteria in the prompt (S2); review after the first live run |
-| Large `other` bucket | `general_praise` is kept separate (S3); if `other` is still above 25%, re-run Pass A with examples from `other` (S5) |
-| Theme IDs and labels change from week to week | Accepted in Phase 3: each week's pulse stands alone. Stable IDs are added with the week-over-week trend (Phase 8) |
-| Support or losses are under-counted because of the root-cause rule | Secondary counts are reported in `themes.json`; revisit the rule after the first live runs (Phase 7) |
-| Small, important topics (KYC, tax) disappear into `other` | Accepted for the weekly top 3. They stay visible in `themes.json`, and a theme from them appears automatically once its volume grows |
+| Keyword labels are less readable than written ones ("Chart & Indicator") | The catalogue gives curated labels for known themes; unmatched labels are logged so the catalogue can grow; humans review the first pulses (Phase 7) |
+| k-means splits by wording instead of issue on some weeks | Micro-clusters plus routing take out praise and vague text first; the stability rule lowers k when the split is not robust |
+| Generic praise or vague text leaks into a theme | Rule L1 plus routing L4; the word lists are config, tuned after the first live runs |
+| Float differences across CPUs change a few assignments | Single-threaded clustering, sorted input and fixed seeds; the exit criterion asks for identical results on one OS and the same labels and top 3 across OSes |
+| The model download fails in CI | Cache `data/models/`; the model is pinned by revision; a clear error names the config key |
+| Theme IDs change from week to week | Unchanged from before, but catalogue matches now give **stable IDs** for known themes, which helps the Phase 8 trend |
 
 ---
 
 ## Phase 4: Composer, Validator, Renderer ★ M1
 
-**Goal:** a complete pulse that passes validation, produced fully offline. *(§4.5, §4.6, §7)*
+**Goal:** a complete pulse that passes validation, produced fully offline, **without an LLM** in the default engine. *(§4.5, §4.6, §7)*
+
+> **Revised 2026-11-22.** Quotes are now picked by rules, and summaries and actions come from per-theme templates. The LLM composer built first is kept for `--engine llm`. The validator, renderer, golden file and retry/failure handling are unchanged.
+
+### Rule-based composer (engine `local`)
+
+**Candidates (code, unchanged).** `select_candidates`: up to 8 reviews per top theme, 8–60 words, no profanity, no redaction tokens, recent first, ratings mixed, limits relaxed in steps (CMP-01/02/04, PII-22).
+
+**Name filter (new, replaces the prompt rule for PII-11).** Without a model reading the candidates, code skips any candidate that probably names a person. It errs towards skipping, since there are up to 8 candidates per theme. A review is skipped when it matches any of:
+- a title before a capitalized word (`Mr`, `Mrs`, `Ms`, `Sir`, `Madam`, `Dr`);
+- `my name is`, or `I am` / `I'm` followed by a capitalized word;
+- a capitalized word right before `from support` / `from customer care` / `from the team`;
+- `agent`, `executive`, `advisor`, `representative`, `named` or `called` followed by a capitalized word;
+- a capitalized word in mid-sentence that is not on an allowlist of product and finance terms (`Groww`, `UPI`, `IPO`, `SIP`, `F&O`, `NSE`, `BSE`, `Nifty`, `Sensex`, `iPhone`, `iPad`, `Android`, `Google`, month and day names, …).
+
+This is a heuristic. The gap stays recorded, and humans still read the first pulses (Phase 7).
+
+**Quote pick (rules).** For each top theme, score each remaining candidate and take the best (ties broken by review ID):
+1. **Representative:** cosine similarity to the theme centroid (the embedding from L2).
+2. **On topic:** contains at least one of the theme's top keywords.
+3. **Typical voice:** when the theme's negative share is 50% or more, prefer a 1–2★ review; otherwise any rating.
+4. **Short:** prefer 10–30 words.
+
+The quote is the window of 1–2 consecutive whole sentences (from `sentence_spans`) with the most theme keywords, within 8–35 words; failing that, the whole review if it is within 60 words. Code slices `canonical_text`, so quotes stay verbatim and on sentence boundaries. The three quotes come from three different reviews.
+
+**Summaries, actions and signals (templates).** Each catalogue entry in `config/themes.yaml` has three short templates with no numbers in them:
+- `summary`: "Reviewers report {kw1} and {kw2} problems, often after an update"
+- `action`: "Triage the most reported {kw1} bugs from the last two weeks with the owning team and ship a fix"
+- `signal`: "fewer reviews mentioning {kw1}"
+
+Placeholders `{kw1}`–`{kw3}` are filled with the theme's top keywords. A theme with no catalogue match uses generic templates:
+- summary: "Reviewers mention {kw1}, {kw2} and {kw3}"
+- action: "Review the top {kw1} complaints with the owning team and fix the most common one"
+- signal: "fewer reviews mentioning {kw1}"
+
+Numbers stay in the renderer (CMP-22), and the validator's `no_stats_in_text` check also applies to templates.
+
+**Validation and fallbacks.** The same `validate.py`. Because the rules are deterministic, a retry means taking the next option, not asking again:
+- a quote problem → the next-best candidate for that theme;
+- too many words → one-sentence quotes, then the short form of each template (`summary_short`, `action_short`).
+
+At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 
 ### Tasks
-- [x] `analysis/compose.py`:
-  - [x] **Candidate selection (code):** up to 8 reviews per top theme; 8–60 words, no profanity or redaction tokens, mixed ratings, recent first; limits relax in steps when a theme has nothing eligible (CMP-01/02/04, PII-22).
-  - [x] **Quote pick (LLM):** candidates are split into numbered sentences; the model returns `{theme_id, review_id, first_sentence, last_sentence}` per theme and **code slices** `canonical_text` from the first sentence's start to the last one's end, so the model never writes quote text. *(Changed from `{review_id, start, end}` character offsets, which LLMs count unreliably: edge cases CMP-10, CMP-12.)*
-  - [x] The quote-pick prompt tells the model to **skip any candidate review that names a person** (a reviewer, a support agent or other staff, anyone else). The scrubber cannot detect names (known gap PII-11). Add a prompt test with a candidate that names a support agent.
-  - [x] **Pulse writing (LLM):** one-line theme summaries plus 3 `ActionIdea`s (`theme_id`, `action`, `signal`), one per theme, as structured output. Words only: the renderer inserts every number (CMP-22).
-- [x] `analysis/validate.py`: every check in §4.6.
-  - [x] Theme count (5 or fewer clustered, exactly 3 in the pulse); quote count 3; action count 3.
-  - [x] **Quote fidelity:** each quote is an exact substring of its review's `canonical_text`.
-  - [x] Each quote's review belongs to the theme it is shown under; each action references a top-3 theme.
-  - [x] **Word count of 250 or fewer** on the rendered body.
-  - [x] **PII scan** on the rendered Doc body and email body.
-  - [x] No leftover `<…>` placeholders or empty sections.
-- [x] Retry loop: on failure, re-prompt only the failing part (quotes, writing, or both) with the error list and the previous answer (at most 2 retries, each validated in full); otherwise write `failure.json` with every attempt and stop with exit code 10 (`VALIDATION_FAILED`).
-- [x] `render/markdown.py`: `Pulse` → Doc text (layout in §7.1) and email text (§7.2). Write `pulse.json`, `pulse.md`, and `validation.json`.
-  - [x] Source line with the filter summary, e.g. `Source: 1,348 reviews (Play Store 1,202 · App Store 146), 9+ words, English only, 7 Sep – 15 Nov 2026` (`render/markdown.source_line`, built early; Phase 4 calls it).
-  - [x] Extend the source line with the `general_praise` share from `themes.json`, e.g. `… 7 Sep – 15 Nov 2026 · 19% general praise` (§7.1), so the pulse isn't read as all negative. Rounded to a whole percent; omitted if the share is 0. Like the rest of the source line, it doesn't count toward the 250-word limit. Covered by the golden-file test.
-- [x] Wire `pulse run --dry-run` through stages 1–6 (`--skip-ingest` uses the stored reviews). `pulse analyze` runs stages 3–6. Without `--dry-run`, `pulse run` stops before publishing until Phase 5.
-- [x] Tests:
-  - [x] Contract tests using hand-built **bad** pulses: an invented quote, 251 words, 4 themes, an email address in the body, a missing action. Each one must be rejected.
-  - [x] Golden-file test: a fixture `Pulse` renders to the expected `pulse.md`.
-  - [x] An end-to-end dry run on fixtures in CI, with the LLM mocked (`tests/test_cli.py`). An autouse fixture blocks the real API in every non-`slow` test.
-  - [x] `@slow` live test: the quote pick skips a candidate that names a support agent (`tests/test_compose_live.py`; written, not yet run).
+- [x] *(LLM composer, built first; kept as `--engine llm`)* quote pick by sentence range, summaries and actions, retry of the failing part only.
+- [x] `analysis/validate.py`: every check in §4.6 (unchanged; applies to both engines).
+- [x] `render/markdown.py`, `pulse.json`, `pulse.md`, `validation.json`, the source line with the general-praise share, the golden file (unchanged).
+- [x] `pulse run --dry-run`, `--skip-ingest`, exit code 10, `failure.json` (unchanged).
+- [ ] Move the LLM composer to `analysis/engines/llm_compose.py`; keep candidate selection and `sentence_spans` shared.
+- [ ] `analysis/engines/rules_compose.py`: name filter, quote scoring and windowing, template filling, fallback rounds.
+- [ ] `config/themes.yaml`: a `summary`, `action`, `signal` and short forms for each catalogue entry, plus the generic templates; a schema check at config load (placeholders limited to `{kw1}`–`{kw3}`, no digits).
+- [ ] Tests:
+  - [ ] name filter: "Rahul from support was rude", "I am Priya Sharma", "Mr Verma", "agent Neha" are skipped; "UPI", "IPO", "Nifty", "iPad", "Monday" are not;
+  - [ ] quote scoring: deterministic choice, the keyword window, 1–2★ preference, three distinct reviews;
+  - [ ] templates: placeholders filled, no numbers, generic fallback for an unmatched theme;
+  - [ ] fallbacks: the next candidate on a quote failure; short templates on word-count overflow; `failure.json` after 2 rounds;
+  - [ ] end-to-end `pulse run --dry-run --skip-ingest` with the local engine on fixture reviews, using a stub embedding function in CI so no model download is needed;
+  - [ ] the existing validator contract tests and golden file keep passing unchanged.
 
 ### Deliverables
-- **M1:** `pulse run --dry-run` produces `runs/{week}/pulse.md` from real reviews.
-
-*Status (2026-11-22): code and offline tests done (`pytest`: 377 passed, LLM mocked). M1 on real data and the exit criteria below are waiting for API credentials, as for Phase 3. VAL-06 (Markdown escaping) is left for Phase 5, once the Docs MCP server's input format is known.*
+- **M1:** `pulse run --dry-run` produces `runs/{week}/pulse.md` from real reviews, with no API key.
 
 ### Exit criteria
-- The dry run on real data passes every validator check.
-- A human read: the quotes are relevant to their themes, and the actions are concrete and grounded in the themes.
+- The dry run on real W46 data passes every validator check, with no network call after the model is cached.
+- A human read: the quotes are relevant to their themes and name no one; the actions are concrete enough for the owning team (template wording tuned where they are not).
 - Checklist items from `problemStatement.md` §4 met offline: themes, quotes, actions, 250 words or fewer, no PII.
 
 ---
@@ -298,7 +353,7 @@ Ties are broken by the count of negative reviews, then by `id`. Themes with no r
 - [ ] `publish/gmail_drafter.py`: create a draft to `PULSE_RECIPIENT` with the subject from §7.2 and a body of the pulse text plus `Full pulse: {doc_url}`. Reuse or update the existing draft ID from `publish.json` when one exists.
 - [ ] Write `runs/{week}/publish.json`, recording success or failure for each step.
 - [ ] `pulse publish --week …` publishes from saved artifacts.
-- [ ] `pulse doctor`: checks config, Anthropic credentials, that both MCP servers can be reached, and the tool-map coverage.
+- [ ] `pulse doctor`: checks config, what the active engine needs (the cached embedding model for `local`; Anthropic credentials only for `llm`), that both MCP servers can be reached, and the tool-map coverage.
 - [ ] Tests:
   - [ ] A **fake in-process MCP server** exposing the mapped tool names. Assert the call order, the arguments, and find-or-update behavior.
   - [ ] Assert that a mapped `send` tool makes startup fail.
@@ -328,11 +383,12 @@ Ties are broken by the count of negative reviews, then by `id`. Themes with no r
 
 ### Tasks
 - [ ] `orchestrator.py`: each stage reads the previous stage's saved artifacts, so `--skip-ingest` and stage-level re-runs work.
-- [ ] `manifest.json`: config snapshot, git SHA, model IDs, prompt versions, per-source counts, token usage, timings, and status for each stage.
+- [ ] `manifest.json`: config snapshot, git SHA, engine, model IDs and revisions, prompt versions (LLM engine), per-source counts, token usage (LLM engine), timings, and status for each stage.
 - [ ] Implement every failure behavior in §10:
   - [ ] A source fails → continue and record it; stop if fewer than `min_reviews` (default 50).
-  - [ ] Backoff at the stage level on top of the SDK's own retries.
-  - [ ] Log the refusal category and stop the stage cleanly.
+  - [ ] *(LLM engine)* Backoff at the stage level on top of the SDK's own retries.
+  - [ ] *(LLM engine)* Log the refusal category and stop the stage cleanly.
+  - [ ] *(Local engine)* Missing embedding model with no network: a clear error naming `analysis.local.model`.
   - [ ] Partial publish → resume.
 - [ ] Clear CLI exit codes (0 for success, a non-zero code per failure class) and readable summaries.
 - [ ] `pulse prune`: remove raw files older than 16 weeks.
@@ -357,7 +413,7 @@ Ties are broken by the count of negative reviews, then by `id`. Themes with no r
 - [ ] Do **3 consecutive live weekly runs**. For each one:
   - [ ] A human check against the `problemStatement.md` §4 checklist.
   - [ ] Feedback from Product, Support, and Leadership readers: is it scannable, are the themes useful, can the actions be acted on?
-- [ ] Tune the prompts, seed themes, and ranking weights based on that feedback. Bump the prompt versions.
+- [ ] Tune the theme catalogue (labels, keywords, templates), the praise/specific/vague word lists, and the ranking weights based on that feedback. For the LLM engine, tune and version the prompts.
 
 ### Deliverables
 - **M3:** a weekly Doc and Gmail draft that appear without anyone running anything.
@@ -373,11 +429,12 @@ Ties are broken by the count of negative reviews, then by `id`. Themes with no r
 
 Pick from these once M3 is stable:
 
-- [ ] **Stable theme IDs across weeks** (needed for the trend): pass last week's taxonomy from `runs/{prev_week}/themes.json` to Pass A as the main seed, reuse a theme's `id` while it still fits, and list changes against last week in `taxonomy_changes` (§4.4).
+- [ ] **Stable theme IDs across weeks** (needed for the trend): the local engine already reuses catalogue IDs for known themes; extend this to keyword-labelled themes by matching each new theme's centroid to last week's (`runs/{prev_week}/themes.json`). For `--engine llm`, pass last week's taxonomy to Pass A as the main seed (§4.4).
 - [ ] **Week-over-week trend:** "↑/↓ vs last week" next to each theme, using `runs/` history (§13 #6).
 - [ ] **Quality eval set:** a small labeled set for theme coherence and usefulness of actions; run it in CI when prompts change.
 - [ ] **Rating trend line:** average rating per week across the window, shown in the source line.
-- [ ] **Cost tuning:** measure whether a lower effort level on Pass B gives the same assignment accuracy.
+- [ ] **Engine comparison:** on the quality eval set, compare the local engine with `--engine llm` (theme coherence, quote relevance, action usefulness) to decide whether the paid engine is ever worth it.
+- [ ] *(LLM engine)* **Cost tuning:** measure whether a lower effort level on Pass B gives the same assignment accuracy.
 
 ---
 

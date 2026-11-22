@@ -111,8 +111,8 @@ This document lists the inputs, states, and failures the system must handle on p
 | PII-08 | Order, ticket, or account numbers that mix letters and digits (`ORD12345678`, `TKT-2026-998877`) | `[number]` | Partly P2: the digits of `ORD12345678` become `ORD[number]`; letter-only IDs are not covered |
 | PII-09 | A bare domain or URL with no scheme (`groww.in/help`, `bit.ly/xyz`) | `[link]` | P2 `privacy/detectors.py` (lowercase bare domains only) |
 | PII-10 | PII in the App Store **title** field | Scrub the title with the same detectors as the body | Moot: `CleanReview` carries the body only, so titles never reach the LLM or artifacts |
-| PII-11 | Personal names in the text ("Rahul from support was rude") | **Known gap (accepted).** The Phase 2 regex scrubber does not detect names, and cannot do so reliably. Mitigation in Phase 4: the quote-pick prompt tells the model to skip any candidate review that names a person (a reviewer, a support agent or other staff, or anyone else), and a human reads the first pulses (P7). Seen on real data: one review names a support executive. | **Known gap**; P4 quote-pick prompt rule |
-| PII-12 | A reviewer's own name inside the text ("I am Priya Sharma, my account…") | Same as PII-11: not detected by the scrubber; the Phase 4 quote-pick prompt skips reviews that name a person. | **Known gap**; P4 quote-pick prompt rule |
+| PII-11 | Personal names in the text ("Rahul from support was rude") | **Known gap (accepted).** The Phase 2 regex scrubber does not detect names, and cannot do so reliably. Mitigation in Phase 4: the default engine's **name filter** skips any quote candidate that probably names a person (a title before a capitalized word, \"my name is\", \"I am\" + a capitalized word, a capitalized word before \"from support\", \"agent\"/\"executive\" + a capitalized word, or a capitalized word mid-sentence that is not on the product-term allowlist); the LLM engine's quote-pick prompt tells the model to skip such candidates. A human reads the first pulses (P7). Seen on real data: one review names a support executive. | **Known gap**; P4 name filter (local) / prompt rule (llm) |
+| PII-12 | A reviewer's own name inside the text ("I am Priya Sharma, my account…") | Same as PII-11: not detected by the scrubber; the name filter (\"I am\" / \"my name is\" + a capitalized word) or the LLM prompt rule skips such candidates. | **Known gap**; P4 name filter / prompt rule |
 
 ### 3.2 Things that must not be redacted (false positives)
 
@@ -139,6 +139,8 @@ This document lists the inputs, states, and failures the system must handle on p
 ---
 
 ## 4. Theme Clustering and Ranking (§4.4, P3)
+
+> **Engines (revised 2026-11-22).** Sections 4.1 and 4.2 and section 10 describe the optional LLM engine (`--engine llm`). The default local engine has its own cases in section 4.5. Ranking (4.4) and untrusted content (4.3) apply to both.
 
 ### 4.1 Discovery (Pass A)
 
@@ -171,6 +173,21 @@ This document lists the inputs, states, and failures the system must handle on p
 | CLU-21 | Abusive, sexual, or self-harm content in reviews causes a refusal | Check `stop_reason`, then the server-side fallback. If it still refuses, log the category. Optionally retry the batch without the offending reviews, which are assigned to `other`. | §10 row 3 |
 | CLU-22 | `stop_reason == "max_tokens"`, so the JSON is truncated | Never parse a partial output. Split the batch in half and retry. | **Gap** |
 
+### 4.5 Local engine (default)
+
+| ID | Scenario | Expected behavior | Covered by |
+|---|---|---|---|
+| LOC-01 | The embedding model is not cached and there is no network | Stop the analysis stage with a clear error naming `analysis.local.model`; nothing is published. CI caches `data/models/`. | P3 (planned) |
+| LOC-02 | The model on the hub changes | Pin `analysis.local.model_revision`; record the revision in the manifest. | P3 (planned) |
+| LOC-03 | A fresh run gives different themes on another CPU | Sorted input, fixed seeds, single-threaded clustering. Same OS: byte-identical; across OSes: same labels and top 3 (exit criterion). | P3 (planned) |
+| LOC-04 | No k from 5 to 3 passes the stability and 3% rules (a quiet week) | Stop with `RankError` and a clear message; nothing is published. | P3 (planned) |
+| LOC-05 | A "theme" is really generic praise or venting ("worst app ever") | The praise rule runs before clustering; micro-clusters dominated by praise or vague words are routed to `general_praise` / `other`. Word lists are config. | P3 (planned) |
+| LOC-06 | Romanized Hindi that passed the English filter forms a cluster | Hinglish words are on the vague list, so the micro-cluster goes to `other`. | P3 (planned) |
+| LOC-07 | A theme's keywords match no catalogue entry | Label from the top two keywords (4 words or fewer); the unmatched label is logged so `config/themes.yaml` can grow. | P3 (planned) |
+| LOC-08 | Two themes match the same catalogue entry | Merge them into one theme. | P3 (planned) |
+| LOC-09 | Keyword labels contain a redaction token or a stop word | Redaction tokens and stop words are removed before c-TF-IDF. | P3 (planned) |
+| LOC-10 | A template produces more than 250 words, or a number | Short template forms are used as a fallback; templates are checked at config load for digits. The validator's `no_stats_in_text` also applies. | P4 (planned) |
+
 ### 4.4 Ranking
 
 | ID | Scenario | Expected behavior | Covered by |
@@ -185,6 +202,8 @@ This document lists the inputs, states, and failures the system must handle on p
 
 ## 5. Quote Selection and Composition (§4.5, P4)
 
+> In the default engine, quotes are picked by rules and summaries and actions come from templates (§4.5). Rows about "the model" apply to `--engine llm`; the checks themselves (fidelity, quote–theme link, distinct reviews, no statistics) apply to both.
+
 ### 5.1 Candidate selection
 
 | ID | Scenario | Expected behavior | Covered by |
@@ -193,7 +212,7 @@ This document lists the inputs, states, and failures the system must handle on p
 | CMP-02 | A theme has 1–4 candidates (fewer than the 5–8 target) | Continue with what exists. | P4: continues with what exists (test) |
 | CMP-03 | All candidates have the same rating | "Mixed ratings" is a preference, not a requirement. Do not fail. | §4.5 |
 | CMP-04 | A candidate contains profanity or abuse | Exclude it from candidates. The audience is internal and professional. | P4: profanity list in `compose.py` |
-| CMP-05 | A candidate mentions a person by name | The quote-pick prompt must skip any candidate that names a person (PII-11). The validator cannot check this, so a human reviews the first pulses. | P4 quote-pick prompt (planned) |
+| CMP-05 | A candidate mentions a person by name | Skip any candidate that probably names a person (PII-11): the name filter in the default engine, the quote-pick prompt in the LLM engine. The validator cannot check this, so a human reviews the first pulses. | P4 name filter (planned) / prompt rule (built) |
 
 ### 5.2 Spans and quote fidelity
 
@@ -314,7 +333,7 @@ This document lists the inputs, states, and failures the system must handle on p
 
 ---
 
-## 10. Claude API (§4.5 model configuration, §10)
+## 10. Claude API (§4.5 model configuration, §10): `--engine llm` only
 
 | ID | Scenario | Expected behavior | Covered by |
 |---|---|---|---|
@@ -340,10 +359,10 @@ Ordered by impact. The first four will block a milestone if they stay open.
 | 4 | The placeholder check matches any `<…>` | VAL-05 | Match only the known template tokens | M1 |
 | 5 | ✅ *Resolved in P1.* Text-hash dedupe merges different users' identical short reviews | NRM-05 | Dedupe by `key`; use the text hash only when a source ID is missing | Accuracy |
 | 6 | ✅ *Resolved in P1.* Raw files keep reviewer identity, which contradicts §11 | PII-24 | Strip identity fields before writing raw files, or document the exception | Privacy |
-| 7 | Personal names in review text | PII-11, PII-12, CMP-05 | **Recorded as a known gap.** The Phase 4 quote-pick prompt skips reviews that name a person; humans review the first pulses | Privacy |
+| 7 | Personal names in review text | PII-11, PII-12, CMP-05 | **Recorded as a known gap.** The Phase 4 name filter (default) or quote-pick prompt (LLM engine) skips reviews that probably name a person; humans review the first pulses | Privacy |
 | 8 | No lock for runs of the same week at the same time | ORC-01 | Lock file per week | M3 |
 | 9 | Duplicate Docs and lost create responses | DOC-01, DOC-06 | Prefer the recorded `doc_id`; run find again before a create retry | M2 |
-| 10 | Statistics written by the LLM | CMP-22 | Insert every number in code during rendering | Accuracy |
+| 10 | Statistics written by the LLM or a template | CMP-22 | Insert every number in code during rendering | Accuracy |
 | 11 | One action per theme is not enforced | CMP-20 | Add a validator check | Quality |
 | 12 | Encoding: UTF-16 exports, Windows console, email subject | ING-04, ORC-11, RND-05 | UTF-8 everywhere; sniff the encoding of imports | M1 / M3 |
 | 13 | ISO week 53 and year-boundary handling | ORC-04, RND-03, RND-04 | Add fixtures for `2026-W53` and `2027-W01` (W53 occurs about 5 weeks after today) | M3 |

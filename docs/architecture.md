@@ -8,7 +8,8 @@
 
 ### Goals
 - Turn 8–12 weeks of public Groww reviews (Play Store and App Store) into a one-page weekly pulse of 250 words or fewer.
-- Make sure every quote in the pulse is **verbatim** and every artifact is **free of PII**. Code enforces both rules; neither depends on the prompt alone.
+- Make sure every quote in the pulse is **verbatim** and every artifact is **free of PII**. Code enforces both rules; neither depends on a model.
+- Run with **no paid API and no review text leaving the machine** by default: theme clustering uses local machine learning, and the pulse is composed by rules and templates. The Claude API is an optional engine (`--engine llm`), off by default.
 - Publish the pulse to **Google Docs** and create a **Gmail draft** through **MCP servers only**.
 - Re-running the same week updates that week's pulse and does not create duplicates.
 - Run unattended once a week, and also on demand from the command line.
@@ -29,8 +30,8 @@
   Public review sources  │                                           │   MCP (stdio / HTTP)
  ┌───────────────────┐   │  ┌─────────┐  ┌─────────┐  ┌───────────┐  │  ┌──────────────────┐
  │ Play Store public │──▶│  │ Ingest  │─▶│ Analyze │─▶│ Publish   │──┼─▶│ Google Docs MCP  │──▶ Google Docs
- │ listing (scraper) │   │  │ + PII   │  │ (Claude)│  │ (MCP      │  │  └──────────────────┘
- ├───────────────────┤   │  │ scrub   │  │         │  │  client)  │  │  ┌──────────────────┐
+ │ listing (scraper) │   │  │ + PII   │  │ local   │  │ (MCP      │  │  └──────────────────┘
+ ├───────────────────┤   │  │ scrub   │  │ ML      │  │  client)  │  │  ┌──────────────────┐
  │ App Store public  │──▶│  └─────────┘  └─────────┘  └───────────┘──┼─▶│ Gmail MCP        │──▶ Gmail draft
  │ RSS feed (JSON)   │   │        │            │             │       │  └──────────────────┘
  └───────────────────┘   │        ▼            ▼             ▼       │
@@ -40,14 +41,15 @@
                          └───────────────────────────────────────────┘
                                          │
                                          ▼
-                                Claude API (Opus 5.5)
+              Optional, off by default: Claude API (`--engine llm`)
 ```
 
 | External dependency | Role | Interface |
 |---|---|---|
 | Play Store public listing | Source of Android reviews | `google-play-scraper` request format, sent with httpx (§4.1); export-file import as a fallback |
 | App Store customer-reviews RSS | Source of iOS reviews | Public JSON feed, no login |
-| Claude API | Theme clustering, quote selection, pulse writing | Anthropic Python SDK |
+| Local embedding model `minishlab/potion-base-8M` (model2vec) | Sentence embeddings for clustering and quote ranking | Downloaded once from Hugging Face (free, about 30 MB), pinned by revision, cached in `data/models/`, runs on CPU |
+| Claude API *(optional)* | Clustering and composing with `--engine llm` only | Anthropic Python SDK (`pip install -e .[llm]`) |
 | Google Docs MCP server | Create or update the pulse document | MCP tools |
 | Gmail MCP server | Create the draft email | MCP tools |
 
@@ -55,25 +57,25 @@
 
 ## 3. High-Level Pipeline
 
-The system is a **code-orchestrated workflow**, not an open-ended agent. The steps are fixed and known in advance. Python controls their order, and Claude is called at the steps that need judgment. This keeps runs predictable, cheap to retry, and easy to test.
+The system is a **code-orchestrated workflow**, not an open-ended agent. The steps are fixed and known in advance, and Python controls their order. By default every step runs locally: clustering uses sentence embeddings and k-means, and composing uses rules and templates, so a run costs nothing and gives the same result every time. The optional LLM engine (`--engine llm`) calls Claude at stages 4 and 5 instead.
 
 ```
 ┌────────┐   ┌──────────┐   ┌───────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
 │1 Ingest│──▶│2 Normalize│─▶│3 PII Scrub│──▶│4 Cluster │──▶│5 Compose │──▶│6 Validate│──▶│7 Publish │
 │        │   │ + Dedupe │   │           │   │ (≤5)     │   │ Pulse    │   │ (guards) │   │ Docs +   │
-│        │   │ + Window │   │           │   │ Claude   │   │ Claude   │   │          │   │ Gmail    │
+│        │   │ + Window │   │           │   │ local ML │   │ rules    │   │          │   │ Gmail    │
 └────────┘   └──────────┘   └───────────┘   └──────────┘   └──────────┘   └────┬─────┘   └──────────┘
                                                                 ▲             │ fail
-                                                                └─────────────┘ (retry ≤2 with errors)
+                                                                └─────────────┘ (next option, ≤2 rounds)
 ```
 
-| # | Stage | Input | Output | LLM? |
+| # | Stage | Input | Output | Model |
 |---|---|---|---|---|
 | 1 | **Ingest** | Play Store listing (or export files), App Store feed | `RawReview[]` | No |
 | 2 | **Normalize / Dedupe / Window** | `RawReview[]` | `Review[]` inside the 8–12 week window | No |
 | 3 | **PII Scrub** | `Review[]` | `CleanReview[]` with identifiers removed | No (rules-based) |
-| 4 | **Cluster** | `CleanReview[]` | Up to 5 `Theme`s plus review→theme assignments | Yes |
-| 5 | **Compose** | Top 3 themes, candidate quotes | `Pulse` draft (structured) | Yes |
+| 4 | **Cluster** | `CleanReview[]` | Up to 5 `Theme`s plus review→theme assignments | Local embeddings + k-means (Claude with `--engine llm`) |
+| 5 | **Compose** | Top 3 themes, candidate quotes | `Pulse` draft (structured) | Rules + templates (Claude with `--engine llm`) |
 | 6 | **Validate** | `Pulse` | Pass, or a list of errors to fix | No |
 | 7 | **Publish** | `Pulse` | Google Doc URL and Gmail draft ID | No (MCP tool calls) |
 
@@ -115,7 +117,7 @@ Rules every adapter follows:
 
 ### 4.3 PII Scrubber (`privacy/scrub.py`)
 
-This runs **before any text reaches the LLM or any artifact**. Defense in depth means each layer still protects the output if another one fails:
+This runs **before any text reaches a model or any artifact**. Defense in depth means each layer still protects the output if another one fails:
 
 1. **Drop identifying fields at ingestion.** Reviewer name, avatar URL, review ID, device model, app version per user, and reply metadata are never copied into `Review`. The only thing kept is an opaque internal key (`sha256(source + source_review_id)`), used to trace a quote back to its review.
 2. **Redact identifiers inside the text** with deterministic regexes:
@@ -124,84 +126,81 @@ This runs **before any text reaches the LLM or any artifact**. Defense in depth 
    - PAN (`[A-Z]{5}[0-9]{4}[A-Z]`), Aadhaar-like 12-digit groups, UPI IDs (`name@bank`) → `[id]`
    - Account, order, or ticket numbers → `[number]`: any run of `privacy.number_min_digits` (8) or more digits (Groww ticket numbers are 8 digits), card-style 4-4-4 groups, and shorter numbers (`reference_min_digits`, 5+) right after a word such as "ticket", "complaint", "UTR" or "account". "order" counts only with an ID marker (`order id`, `order no`, `order #`), because in a trading app it usually precedes a quantity. Amounts and quantities are never redacted: a number after `₹`, `Rs` or `INR`, or before `shares`, `qty`, `units`, `lots`, `rs`, `/-`, `lakh`, `crore` or `worth`.
    - URLs and `@handles` → `[link]` / `[handle]`
-   Overlapping matches are resolved longest-first, so an email inside a URL becomes a single `[link]`. Redaction repeats until the scanner finds nothing, which guarantees `find_pii(scrub(x).canonical_text) == []`. All patterns run in linear time (tested on 50 KB hostile input). **Known gap: personal names are not detected**; regexes cannot do this reliably (edge case PII-11). The Phase 4 quote-pick prompt skips any review that names a person (§4.5).
+   Overlapping matches are resolved longest-first, so an email inside a URL becomes a single `[link]`. Redaction repeats until the scanner finds nothing, which guarantees `find_pii(scrub(x).canonical_text) == []`. All patterns run in linear time (tested on 50 KB hostile input). **Known gap: personal names are not detected**; regexes cannot do this reliably (edge case PII-11). The quote picker skips any review that probably names a person: a name filter in the default engine, a prompt rule in the LLM engine (§4.5).
 3. **Final output scan.** The same detectors run again over the finished pulse, the Doc body, and the email body just before publishing. Any hit stops the publish (see §4.6).
 
 The scrubbed text is the **canonical text**. Quotes are checked against this version, so a redacted quote still counts as verbatim.
 
-### 4.4 Theme Clustering (`analysis/cluster.py`, `analysis/rank.py`)
+### 4.4 Theme Clustering (`analysis/cluster.py`, `analysis/engines/`, `analysis/rank.py`)
 
-**Approach: LLM-driven clustering with structured output, in two passes, plus deterministic ranking in code.** The implementation steps are in `implementation-plan.md` Phase 3 (S1–S6).
+**Approach (default engine `local`): sentence embeddings + k-means, with rule-based routing of praise and vague text, and deterministic ranking in code.** No paid API is called and no review text leaves the machine. The implementation steps are in `implementation-plan.md` Phase 3 (L1–L8), and so is the measured comparison of TF-IDF + k-means, sentence embeddings + k-means, and BERTopic on 2026-W46.
 
-**Input profile (2026-W46).** After the cleaning rules (§4.2: 9+ words, English only), 1,348 reviews remain from about 10,000 fetched (Play Store 1,202 · App Store 146). They total about 41k words, roughly 80k input tokens with IDs, ratings and dates, so the whole set fits in one request. Ratings are bimodal (43% 1★, 35% 5★; 49% are 1–2★). About a fifth are 4–5★ with nothing specific to act on. Many reviews mix topics ("the app hung, I lost money, support never replied"), and some 5★ reviews are complaints or feature requests.
+**Input profile (2026-W46).** After the cleaning rules (§4.2: 9+ words, English only), 1,348 reviews remain from about 10,000 fetched (Play Store 1,202 · App Store 146). Ratings are bimodal (43% 1★, 35% 5★; 49% are 1–2★). About a fifth are 4–5★ with nothing specific to act on, about 70 are vague complaints ("worst app, useless"), and about 50 are romanized Hindi that passed the English filter. Many reviews mix topics.
 
-**Why not embeddings.** Embeddings plus k-means/HDBSCAN was considered and rejected. It needs another model provider and more dependencies, its clusters come without labels or inclusion criteria (an LLM would still have to name them), and it groups short reviews by wording rather than by issue. Reconsider it only if the cleaned volume goes above about 20k reviews per window.
+**Why this method** (measured on W46, details in the plan):
 
-**Pass A: Theme discovery**
-- Input: every scrubbed review, one line each: `r0001 | 1★ | 2026-09-07 | <canonical_text>`. The order is shuffled with a seed derived from the ISO week, so date order does not bias the model and a run can be repeated exactly. Above `analysis.max_discovery_reviews` (3,000), a stratified sample by rating band (1–2★ / 3★ / 4–5★) × week is used.
-- The prompt states the product context (a stock, F&O, mutual fund, and IPO investing app in India) and lists **seed themes** to consider: onboarding/KYC, payments and fund transfers, withdrawals, app performance and bugs, charges and brokerage, customer support, F&O and trading features, statements and tax reports. The model may merge, rename, or drop seeds based on the data.
-- Granularity rules: a theme is a **product area or problem type that one team could own**, not a sentiment ("bad experience") or a catch-all ("app issues"). Small related seeds are merged rather than dropped (for example, payments, withdrawals and redemption delays may become one money-movement theme). A theme should hold at least `analysis.min_theme_share` (3%) of reviews; smaller topics go to `other`.
-- Output (structured, schema-validated): **at most 5** themes, each with `id` (snake_case), `label` (4 words or fewer, shown in the pulse), `description`, `include`, `exclude`, and `example_ids` (3 review IDs, which code checks exist), plus `taxonomy_changes` listing what was merged, renamed or dropped compared with the seeds. Effort: `high`.
-- Themes are discovered again each week, so theme IDs can change between weeks. Keeping IDs stable (by passing last week's taxonomy as the main seed) is part of the week-over-week trend in Phase 8 (§13 #6).
+| Method | Theme quality | Extra install | Determinism |
+|---|---|---|---|
+| TF-IDF + k-means | Poor: one catch-all cluster of 57% at k=5 | ≈ 160 MB | Seeded, but unstable across seeds (ARI 0.35) |
+| MiniLM (torch) + k-means | Splits by tone more than product area | ≈ 1.1 GB | Seeded, very stable (ARI 0.93) |
+| **model2vec + k-means (chosen)** | Five distinct product themes; `other` 9% | ≈ 200 MB + 30 MB model | Seeded; identical results across processes; ARI median 0.79 at k=5 |
+| BERTopic | One topic of 97%: HDBSCAN finds no dense regions in these short reviews | ≈ 1.4 GB | Seeded UMAP: identical runs |
 
-**Reserved buckets (not themes)**
+**Pipeline**
+1. **General praise first (rule).** A review rated 4–5★ with a praise word and none of the "specific" words (`but`, `please`, `issue`, `fix`, `add`, `charges`, `support`, …) is `general_praise` and is not clustered. Word lists are config.
+2. **Embed** `canonical_text` with model2vec `minishlab/potion-base-8M` (pinned revision, L2-normalized, input sorted by review ID).
+3. **Micro-clusters:** k-means with `k0 = 12`, `n_init = 50`, `random_state = 42`.
+4. **Route micro-clusters** using their c-TF-IDF keywords: mostly positive with praise words → `general_praise`; mostly "vague" keywords, or loose (median cosine to centroid under 0.55) → `other`; the rest are theme micro-clusters.
+5. **Choose k and cluster the theme reviews:** the largest k in 5, 4, 3 for which every cluster holds at least 3% of reviews and the median ARI between seed 42 and seeds 1–3 is at least 0.75. Silhouette is not used: on this data it is low and flat for every k. On W46 the rule picks k = 5.
+6. **Per-review `other`:** a theme review with cosine similarity under 0.40 to its centroid goes to `other`. The second-nearest centroid, if within 0.05, is `secondary_theme_id`.
+7. **Label from keywords:** match each theme's top c-TF-IDF keywords to the **theme catalogue** (`config/themes.yaml`: id, label of 4 words or fewer, keywords, Phase 4 templates). Two or more of the top 6 keywords must match; with no match the label is the top two keywords ("Chart & Indicator"). Catalogue matches give stable IDs for known themes from week to week.
+8. **Checks:** stability ARI (warning under 0.75), `small_theme`, `other_share_high` (above 25%, one retry with `k0 = 16`). The local engine has no sentiment, so assignments carry `sentiment: null`.
+
+**Reserved buckets (not themes, both engines)**
 - `general_praise`: positive, with nothing specific to act on ("very good app, easy to use").
-- `other`: specific, but outside the taxonomy.
-- Neither counts toward the 5-theme limit and neither is ranked. Only `other` counts toward the re-discovery rule below. The `general_praise` share is shown in the pulse source line (§7.1), so the pulse isn't read as all negative.
+- `other`: specific but outside the themes, vague, or not clearly English.
+- Neither counts toward the 5-theme limit and neither is ranked. The `general_praise` share is shown in the pulse source line (§7.1), so the pulse isn't read as all negative.
 
-**Pass B: Assignment**
-- Each review gets exactly one **primary** label: a theme ID, `general_praise`, or `other`. An optional `secondary_theme_id` and a `sentiment` (`positive|neutral|negative|mixed`) are recorded too.
-- **Primary-label rule:** the main thing the reviewer wants fixed; when that is unclear, the root cause over its consequence. "The app hung and I lost money" goes to performance, not losses. Support is primary only when support is the main complaint; otherwise it is the secondary theme. Ranking uses the primary label only, so shares add up to 100%. Secondary counts are reported in `themes.json`.
-- Batches of at most `analysis.assign_batch_size` (500), balanced in size (W46: 3 batches of about 450), run concurrently (at most 3 at once), with the theme definitions from Pass A held fixed. The system prompt and theme definitions are a cached prefix (`cache_control`); only the batch changes. Effort: `medium`.
-- Code checks: every input ID appears exactly once; unknown theme IDs and IDs outside the batch are rejected; missing IDs are re-requested in a small follow-up batch (at most 2 retries), after which the stage fails with `failure.json`.
+**Optional engine `llm`** (`--engine llm`, needs `ANTHROPIC_API_KEY`; built first and kept): two passes with Claude. Pass A reads every review and proposes at most 5 themes with `include`/`exclude` rules and example IDs; Pass B assigns every review in batches of 500 (primary theme = what the reviewer most wants fixed, root cause over consequence) and a sentiment; code re-requests missing or invalid labels, re-runs discovery once if `other` is above 25%, and measures agreement with a 100-review consistency probe. Both engines return the same `ClusterResult`, so everything after this stage is shared.
 
-**Quality checks (code, recorded in `themes.json` and `manifest.json`)**
-- `other` above `analysis.max_other_share` (25%): re-run Pass A once with up to 50 `other` reviews as examples, then Pass B again.
-- A theme below 3%: `small_theme` warning (it can still be ranked).
-- **Consistency probe:** `analysis.consistency_sample` (100) random reviews are assigned a second time, in a separate call with a different order. Agreement below 85% is a warning; it usually means two themes overlap.
-- Rating vs. sentiment disagreements (for example, 4–5★ marked negative) are counted, for diagnosis only.
-
-**Ranking (deterministic, in code):** only the clustered themes are ranked, not `general_praise` or `other`.
+**Ranking (deterministic, in code, both engines):** only the clustered themes are ranked, not `general_praise` or `other`.
 ```
 volume_share   = theme reviews / all reviews in the window
-negative_share = theme reviews rated 1–2★ / theme reviews          # rating, not LLM sentiment
+negative_share = theme reviews rated 1–2★ / theme reviews          # star rating, never a model's sentiment
 recency_weight = clamp(share_last_14d / volume_share, 0.5, 2.0)    # 1.0 if the theme has < 5 reviews in the last 14 days
 score          = volume_share × (1 + negative_share) × recency_weight
 ```
-- `negative_share` uses the star rating, not the model's sentiment, so ranking stays deterministic.
+- `negative_share` uses the star rating, so ranking stays deterministic in both engines.
 - The 14-day window (`analysis.recency_days`) gives more weight to recent reviews, since this is a *weekly* pulse. The under-5 rule keeps small themes from swinging on a handful of reviews (W46 has 245 reviews in its last 14 days).
 - Ties are broken by the count of negative reviews, then by `id`. Themes with no reviews score 0 and are never selected. Fewer than 3 rankable themes fails the stage, because the pulse needs exactly 3.
 
-The **top 3** by score go into the pulse. All themes (up to 5), the taxonomy, every assignment, per-theme stats (count, `volume_share`, `negative_share`, last-14-day share, `recency_weight`, score, rank, secondary count), the `general_praise` and `other` shares, the consistency agreement, and any warnings are kept in `runs/{week}/themes.json`.
+The **top 3** by score go into the pulse. All themes (up to 5), every assignment, per-theme stats (count, `volume_share`, `negative_share`, last-14-day share, `recency_weight`, score, rank, secondary count), the `general_praise` and `other` shares, the engine and model, the stability (or consistency) measure, and any warnings are kept in `runs/{week}/themes.json`.
 
-### 4.5 Pulse Composer (`analysis/compose.py`)
+### 4.5 Pulse Composer (`analysis/compose.py`, `analysis/engines/`)
 
-**Quote candidate selection (code first, then the LLM):**
-1. For each top theme, code picks up to 8 *candidate* reviews: assigned to that theme, 8–60 words, no profanity, no redaction tokens, most recent first, with ratings mixed (one per rating band in turn). If a theme has nothing eligible, the limits relax in steps (5–80 words, then any review whose text is at most 30% placeholders); if there is still nothing, the run stops with a clear failure (edge cases CMP-01/02/04/16, PII-22).
-2. Each candidate is split into **numbered sentences**. Claude chooses **one quote per theme** (3 in total) and returns the `review_id` plus a first and last sentence number. The prompt tells it to skip any candidate that names a person (a reviewer, a support agent or other staff), because the scrubber cannot detect names (§4.3, PII-11). It never returns quote text and never counts characters (LLM character offsets are unreliable, CMP-10).
-3. Code builds the quote by slicing `canonical_text` from the start of the first sentence to the end of the last. Because of this, the model **cannot invent wording**, and a quote always starts and ends on a sentence boundary (CMP-12).
+**Quote candidates (code, both engines).** For each top theme, code picks up to 8 *candidate* reviews: assigned to that theme, 8–60 words, no profanity, no redaction tokens, most recent first, with ratings mixed (one per rating band in turn). If a theme has nothing eligible, the limits relax in steps (5–80 words, then any review whose text is at most 30% placeholders); if there is still nothing, the run stops with a clear failure (edge cases CMP-01/02/04/16, PII-22). Each candidate is split into whole sentences (`sentence_spans`, code-point offsets).
 
-**Writing the pulse:**
-- Claude receives the top 3 themes with their definitions, how they compare (as context only), the 3 chosen quotes, a sample of recent reviews per theme, and the number of words left in the 250-word budget.
-- It returns one summary per theme and **one action idea per theme** (`theme_id`, `action`, `signal`), words only. **Every number in the pulse is inserted by the renderer** from the computed stats (CMP-22); a summary that states a statistic fails validation.
-- Action ideas must be concrete and doable. They name the change and the signal that would show it worked.
-- If validation fails, only the failing part is asked for again (quotes, writing, or both), with the error list and the previous answer, at most 2 retries; each attempt is validated in full.
+**Default engine `local`: rules and templates, no model writing text**
+- **Name filter (PII-11).** Code skips any candidate that probably names a person: a title before a capitalized word (`Mr`, `Ms`, `Sir`, `Madam`), `my name is`, `I am` + a capitalized word, a capitalized word before `from support` / `from customer care`, `agent` / `executive` / `advisor` + a capitalized word, or any capitalized word mid-sentence that is not on an allowlist of product and finance terms (`Groww`, `UPI`, `IPO`, `SIP`, `F&O`, `NSE`, `Nifty`, `iPad`, month and day names, …). It errs towards skipping.
+- **Quote pick.** Each remaining candidate is scored by similarity to the theme centroid, presence of the theme's top keywords, a 1–2★ rating when the theme is mostly negative, and a length of 10–30 words; ties are broken by review ID. The quote is the window of 1–2 whole sentences with the most theme keywords (8–35 words), else the whole review (60 words or fewer). Code slices `canonical_text`, so quotes are always verbatim and start and end on a sentence boundary. The three quotes come from three different reviews.
+- **Summaries and actions.** Each theme catalogue entry (`config/themes.yaml`) carries a `summary`, an `action` and a `signal` template, plus short forms, with `{kw1}`–`{kw3}` filled from the theme's top keywords; themes with no catalogue match use generic templates. Templates contain no numbers: **every number in the pulse is inserted by the renderer** from the computed stats (CMP-22).
+- **Fallbacks.** If validation fails, the rules take the next option rather than asking again: the next-best candidate for a quote problem; one-sentence quotes and then the short templates for too many words. At most 2 rounds; each round is validated in full.
 
-**Model configuration** (from the `claude-api` defaults):
+**Optional engine `llm`** (`--engine llm`): Claude picks one quote per theme by **sentence number** (review ID plus first and last sentence; it never writes quote text or counts characters, CMP-10), skipping any candidate that names a person, and writes one summary and one action idea per theme, words only. On a validation failure only the failing part (quotes, writing, or both) is asked for again, with the errors and the previous answer, at most 2 retries.
 
-| Setting | Value | Why |
+| Setting (LLM engine only) | Value | Why |
 |---|---|---|
 | Model | `claude-opus-5-5` | Default current model |
 | Thinking | Adaptive (always on for Opus 5.5) | Clustering and prioritizing need judgment |
 | Effort | `high` for clustering and composing; `medium` for batch assignment | Opus 5.5 defaults to `medium`, so the level is set explicitly per call |
-| Output format | Structured outputs (`output_config.format` / `client.messages.parse()`) | Guarantees schema-valid JSON for themes, assignments, and the pulse |
-| Streaming | On for large clustering requests | Avoids HTTP timeouts on long inputs and outputs |
+| Output format | Structured outputs (`output_config.format`), validated in code after the `stop_reason` check | Schema-valid JSON for themes, assignments, and the pulse |
+| Streaming | On, with `get_final_message()` | Avoids HTTP timeouts on long inputs and outputs |
 | Refusal handling | Check `stop_reason`; server-side `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) | Required handling for Opus 5.5 |
 | Prompt caching | `cache_control` on the stable system prompt and theme definitions | Pass B batches share the same prefix |
 
 ### 4.6 Validator (`analysis/validate.py`)
 
-These are hard checks run in code. If any fails, the composer is re-prompted with the list of errors (at most 2 retries). If it still fails, the run stops **before publishing** and writes `runs/{week}/failure.json`.
+These are hard checks run in code, the same for both engines. If any fails, the composer tries again: the rules engine takes its next option (another candidate, a shorter quote, the short template), and the LLM engine is re-prompted with the list of errors. At most 2 retries. If it still fails, the run stops **before publishing** and writes `runs/{week}/failure.json`.
 
 | Check | Rule |
 |---|---|
@@ -247,14 +246,15 @@ publish/
 ### 4.8 Orchestrator and CLI (`pulse/cli.py`)
 
 ```
-pulse run     [--week 2026-W47] [--weeks-back 10] [--dry-run] [--skip-ingest]
+pulse run     [--week 2026-W47] [--weeks-back 10] [--dry-run] [--skip-ingest] [--engine local|llm]
 pulse ingest  [--source play_store|app_store|all] [--week ...] [--full]
-pulse analyze [--week ...]           # stages 2–6 only, no publishing
+pulse analyze [--week ...] [--engine local|llm]   # stages 3–6 only, no publishing
 pulse publish [--week ...]           # stage 7 from saved run artifacts
-pulse doctor                         # checks config, MCP tools, API credentials
+pulse doctor                         # checks config, MCP tools, and what the engine needs
 ```
 
 - `--dry-run` runs every stage, writes `runs/{week}/pulse.md`, and **skips MCP calls**. Use it for review and in CI.
+- `--engine` overrides `analysis.engine` (default `local`). `llm` needs the `[llm]` extra and `ANTHROPIC_API_KEY`; `pulse doctor` checks the embedding model for `local` and the API credential only for `llm`.
 - Each stage reads the previous stage's saved output, so any stage can be re-run alone.
 
 ### 4.9 Scheduling
@@ -294,14 +294,16 @@ class CleanReview:
 
 @dataclass
 class Theme:
-    id: str                  # "t1".."t5"
-    label: str               # e.g. "Withdrawals & payouts"
+    id: str                  # snake_case: a catalogue ID ("charges") or "kw_<keywords>" (local),
+                             # or the LLM's ID (llm)
+    label: str               # 4 words or fewer, e.g. "Charges & brokerage"
     description: str
     review_ids: list[str]
     volume_share: float
     negative_share: float
     avg_rating: float
     score: float
+    summary: str             # one line from a template (local) or the LLM; numbers are added in code
 
 @dataclass
 class Quote:
@@ -310,6 +312,7 @@ class Quote:
     span: tuple[int, int]    # character offsets into canonical_text
     text: str                # = canonical_text[span[0]:span[1]], filled in by code
     rating: int
+    source: str              # "play_store" | "app_store", shown next to the quote
 
 @dataclass
 class ActionIdea:
@@ -326,6 +329,8 @@ class Pulse:
     top_themes: list[Theme]  # exactly 3
     quotes: list[Quote]      # exactly 3
     actions: list[ActionIdea]# exactly 3
+    general_praise_share: float  # shown in the source line
+    clustered_theme_count: int   # 5 or fewer
 ```
 
 ---
@@ -339,17 +344,19 @@ data/
 ├── imports/play/                 # drop Play Store exports here
 ├── raw/{source}/{run_id}.jsonl   # mapped fetch results (no reviewer identity fields)
 ├── ingest_state.json             # per-source coverage for incremental ingest
+├── models/                       # cached embedding model (pinned revision), local engine
 └── reviews.parquet               # normalized, deduped review store (all time)
 
 runs/{iso_week}/
-├── manifest.json                 # config snapshot, git SHA, model IDs, counts, timings
+├── manifest.json                 # config snapshot, git SHA, engine, model IDs, counts, timings
 ├── clean_reviews.jsonl           # scrubbed input used for this run
 ├── themes.json                   # up to 5 themes + stats + assignments + general_praise/other shares
 ├── pulse.json                    # structured Pulse
 ├── pulse.md                      # rendered note (what goes into Docs and email)
 ├── validation.json               # check results
 ├── publish.json                  # doc_id, doc_url, draft_id, timestamps
-└── llm/                          # request/response logs (scrubbed text only)
+├── failure.json                  # only when a run stopped before publishing
+└── llm/                          # LLM engine only: request/response logs (scrubbed text only)
 ```
 
 - `data/` and `runs/` are **git-ignored**. Even scrubbed review text stays out of version control.
@@ -422,16 +429,27 @@ analysis:
   max_words: 250
   quote_min_words: 8
   quote_max_words: 60
-  seed_themes: [onboarding_kyc, payments, withdrawals, performance_bugs,
-                charges, support, trading_features, statements_tax]
-  max_discovery_reviews: 3000       # above this, Pass A uses a stratified sample (§4.4)
-  assign_batch_size: 500
+  engine: local                     # local (default, free) | llm (optional, Claude API)
   min_theme_share: 0.03
-  max_other_share: 0.25             # above this, Pass A runs again with `other` examples
+  max_other_share: 0.25
   recency_days: 14
-  consistency_sample: 100
+  theme_catalogue: config/themes.yaml   # labels, keywords, summary/action/signal templates
+  local:                            # §4.4 pipeline
+    model: minishlab/potion-base-8M
+    model_revision: "<pinned commit>"
+    micro_clusters: 12
+    n_init: 50
+    seed: 42
+    min_stability: 0.75             # median ARI vs 3 other seeds, used to choose k
+    other_cosine: 0.40
+    secondary_margin: 0.05
+    praise_words: [good, great, best, easy, smooth, love, ...]
+    specific_words: [but, please, issue, fix, add, not, slow, charges, support, ...]
+    vague_words: [worst, bad, useless, waste, experience, ...]
+  # LLM engine only: seed_themes, max_discovery_reviews, assign_batch_size,
+  # assign_concurrency, consistency_sample, min_agreement (see config/pulse.yaml)
 
-llm:
+llm:                                # used only with --engine llm
   model: claude-opus-5-5
   effort: { cluster: high, assign: medium, compose: high }
   fallbacks: default
@@ -449,7 +467,7 @@ mcp:
 
 | Env var | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` *(or an `ant auth login` profile)* | Claude API credentials |
+| `ANTHROPIC_API_KEY` *(or an `ant auth login` profile)* | Claude API credentials, **only for `--engine llm`**; the default engine needs none |
 | `PULSE_RECIPIENT` | Draft recipient (self or alias), never hardcoded |
 | `PULSE_DOCS_FOLDER_ID` | Target Drive folder for the pulse docs |
 
@@ -463,7 +481,8 @@ AI Agent+MCP/
 │   ├── problemStatement.md
 │   └── architecture.md
 ├── config/
-│   └── pulse.yaml
+│   ├── pulse.yaml
+│   └── themes.yaml               # theme catalogue: labels, keywords, templates
 ├── src/pulse/
 │   ├── cli.py
 │   ├── orchestrator.py
@@ -478,11 +497,16 @@ AI Agent+MCP/
 │   │   ├── scrub.py
 │   │   └── detectors.py
 │   ├── analysis/
-│   │   ├── llm.py                # Anthropic client wrapper (structured outputs, retries, fallbacks)
-│   │   ├── prompts/              # versioned prompt templates
-│   │   ├── cluster.py
+│   │   ├── cluster.py            # ClusterResult, themes.json, engine selection
+│   │   ├── compose.py            # candidates, sentence spans, ComposeResult, artifacts
+│   │   ├── engines/
+│   │   │   ├── local_cluster.py  # embeddings + k-means pipeline (default)
+│   │   │   ├── rules_compose.py  # name filter, quote rules, templates (default)
+│   │   │   ├── llm_cluster.py    # optional: two-pass Claude clustering
+│   │   │   └── llm_compose.py    # optional: Claude quote pick and writing
+│   │   ├── llm.py                # optional: Anthropic client wrapper
+│   │   ├── prompts/              # optional: versioned prompt templates
 │   │   ├── rank.py
-│   │   ├── compose.py
 │   │   └── validate.py
 │   ├── render/
 │   │   └── markdown.py           # Pulse → Doc text / email text
@@ -510,10 +534,12 @@ AI Agent+MCP/
 | Failure | Behavior |
 |---|---|
 | A source is down or the feed returns nothing | Continue with the other sources; record it in `manifest.json` and in the pulse source line. Stop the run if the total is below `min_reviews` (default 50). |
-| Claude API 429 / 5xx / network error | SDK retries (`max_retries`), then exponential backoff at the stage level. Errors are caught most-specific first (`RateLimitError` → `APIStatusError` → `APIConnectionError`). |
-| `stop_reason == "refusal"` | The server-side fallback handles it. If it still refuses, log the category and stop the stage. |
-| Structured output fails validation | Re-prompt with the validation errors, up to 2 times, then stop before publishing. |
-| Validator fails (quotes, word count, PII) | Same as above. **Nothing is published.** |
+| *(LLM engine)* Claude API 429 / 5xx / network error | SDK retries (`max_retries`), then exponential backoff at the stage level. Errors are caught most-specific first (`RateLimitError` → `APIStatusError` → `APIConnectionError`). |
+| *(LLM engine)* `stop_reason == "refusal"` | The server-side fallback handles it. If it still refuses, log the category and stop the stage. |
+| *(LLM engine)* Structured output fails validation | Re-prompt with the validation errors, up to 2 times, then stop before publishing. |
+| *(Local engine)* Embedding model missing and no network | Stop the analysis stage with a clear error naming `analysis.local.model`; nothing is published. CI caches `data/models/`. |
+| *(Local engine)* No stable k ≥ 3, or `other` above 25% after the retry | Stop with `RankError` / record `other_share_high`, as for the LLM engine. |
+| Validator fails (quotes, word count, PII) | The composer tries its next option (rules) or re-prompts (LLM), at most 2 times. **Nothing is published** on a final failure. |
 | MCP server unreachable or tool missing | `pulse doctor` and startup checks report it clearly. Analysis results are kept, so `pulse publish` can be re-run later. |
 | Docs succeeds but Gmail fails | `publish.json` records partial success, and re-running `pulse publish` resumes from the Gmail step. |
 | Duplicate run for the same week | Find-or-update on the Doc title; existing draft ID in `publish.json` prevents a second draft. |
@@ -522,14 +548,14 @@ AI Agent+MCP/
 
 ## 11. Security and Privacy
 
-- **Least data:** reviewer identity fields are never stored. Only scrubbed text reaches the LLM, the logs, or any artifact.
+- **Least data:** reviewer identity fields are never stored. Only scrubbed text reaches a model, the logs, or any artifact. With the default engine, **no review text leaves the machine**: the embedding model runs locally. Only `--engine llm` sends scrubbed text to the Claude API.
 - **Two PII gates:** redaction before analysis, and a scan of the final output that blocks publishing on any hit (§4.3, §4.6).
-- **Known gap: personal names.** Neither gate detects names (PII-11). The quote-pick prompt skips reviews that name a person, and humans review the first pulses (Phase 7).
-- **No Google credentials in the app:** OAuth tokens live with the MCP servers. The app holds only an Anthropic credential.
+- **Known gap: personal names.** Neither PII gate detects names (PII-11). The quote picker skips reviews that probably name a person (a rule-based name filter by default, a prompt rule in the LLM engine), and humans review the first pulses (Phase 7).
+- **No Google credentials in the app:** OAuth tokens live with the MCP servers. The default engine needs no credential at all; `--engine llm` needs an Anthropic credential.
 - **Draft only:** the Gmail publisher cannot send email (§4.7).
 - **Secrets:** environment variables or `.env` only. `.env.example` documents the variable names without values.
 - **Store compliance:** nothing behind a login is ever read. The App Store feed is a public feed. The Play Store listing reader was approved by the project owner for this course project (§13 #2); it is public-only, throttled, bounded by the window and `max_reviews`, and can be switched off (`ingest.play_public.enabled: false`) to fall back to export files.
-- **Logs:** LLM request and response logs hold scrubbed text only and stay in git-ignored `runs/`.
+- **Logs:** LLM request and response logs (LLM engine only) hold scrubbed text only and stay in git-ignored `runs/`.
 
 ---
 
@@ -539,7 +565,9 @@ AI Agent+MCP/
 |---|---|---|
 | Unit | PII detectors, normalization, dedupe, window, ranking formula, word counting, quote-span slicing | pytest with synthetic fixtures |
 | Contract | Validator rejects invented quotes, more than 250 words, 4 themes in the pulse, leftover PII | Hand-built bad `Pulse` objects |
-| LLM integration | Clustering returns 5 or fewer themes, every review is assigned, schema is valid | Small recorded fixture set; marked `@slow` and run on demand (it costs money) |
+| Local clustering | Praise rule, routing, choice of k, labels, determinism (two runs give identical `themes.json`) | pytest with a stub embedding function (no download); a `@slow` check with the real model on fixtures, free |
+| Rules composer | Name filter, quote scoring, templates, fallbacks | pytest with synthetic candidates |
+| LLM integration *(optional engine)* | Clustering returns 5 or fewer themes, every review is assigned, schema is valid | Fake model offline; `@slow` live tests on demand (they cost money) |
 | MCP integration | Logical actions map to tool calls, find-or-update behavior, refusal of `send` tools | A fake in-process MCP server exposing the same tool names |
 | End-to-end | `pulse run --dry-run` on fixtures produces a valid `pulse.md` | CI on every PR |
 | Quality eval *(later)* | Theme coherence and usefulness of actions | Small labeled set plus human review of the first few weekly pulses |
@@ -548,14 +576,15 @@ AI Agent+MCP/
 
 ## 13. Open Decisions
 
-| # | Decision | Options | Current leaning | Status (2026-11-21) |
+| # | Decision | Options | Current leaning | Status (2026-11-22) |
 |---|---|---|---|---|
 | 1 | Which Docs and Gmail MCP servers | A community Google Workspace MCP server (stdio), a hosted connector, or the environment's built-in connectors | Whatever the course environment provides; isolated behind `tool_map.yaml` | **Open.** Needs the user to choose and authenticate a server. Fallback: `mcp.docs` / `mcp.gmail` are blank in `pulse.yaml`, `tool_map.yaml` lists the logical actions with no tools mapped, and `pulse doctor` reports both as not configured. This blocks Phase 5 only. |
 | 2 | Play Store data path | Manual export files vs. a public-listing fetcher | Export files first; fetcher only after a Terms of Service check | **Settled (revised 2026-11-21): public listing via `google-play-scraper`, approved by the project owner for this course project.** Reason: the brief names the Play Store listing and `com.nextbillion.groww` as the primary target, and only Groww's developers can download a Play Console export, so an export-only rule would leave Android reviews (most of Groww's users) out of scope. Conditions: public listing only, no login or cookies, rate-limited, fetching only what the review window needs (incremental weekly runs, `max_reviews` cap), and no reviewer identity fields read. **Risk accepted:** Google Play's Terms of Service restrict automated access to Play. This is acceptable for a course project but should be re-reviewed before any production or commercial use. Fallback: set `ingest.play_public.enabled: false` to read export files from `data/imports/play/` (mapping in `ingest.play_columns`, Play Console format by default). The problem statement's review-source rule (§6) was amended to match. |
 | 3 | Groww iOS App Store ID | Look up and verify | Must be confirmed before the first App Store ingest | **Settled.** `1404871703` ("Groww Stocks, Mutual Fund, IPO", bundle `com.nextbillion.groww`), confirmed through the iTunes Search API. The `in` RSS feed responds, but intermittently serves empty pages; see §4.1 for how the adapter handles that. |
 | 4 | Non-English reviews | Exclude from quotes vs. translate vs. drop | Count toward volume, exclude from quotes (no translated "verbatim" quotes) | **Settled (2026-11-21, tutor requirement): dropped at ingest.** Only English reviews are kept; Hindi, Hinglish (`hi-Latn`) and every other language are dropped and counted per source (§4.2). The Play Store fetch no longer requests `hl=hi`. |
 | 5 | Implementation language | Python (assumed in this document) vs. TypeScript | Python | **Settled.** Python 3.11+ (developed on 3.12). |
-| 6 | Week-over-week trend line in the pulse | Include a "↑/↓ vs last week" marker per theme | Nice to have; data is already kept in `runs/` | Unchanged (Phase 8). Needs stable theme IDs across weeks (last week's taxonomy passed to Pass A as the main seed, §4.4), which is also deferred to Phase 8. |
+| 6 | Week-over-week trend line in the pulse | Include a "↑/↓ vs last week" marker per theme | Nice to have; data is already kept in `runs/` | Unchanged (Phase 8). Needs stable theme IDs across weeks. The local engine's theme catalogue already gives stable IDs for known themes; the LLM engine would pass last week's taxonomy to Pass A as the main seed. |
+| 7 | Analysis engine | Claude API (paid) vs. local machine learning (free) | Local by default | **Settled (2026-11-22, project owner): no paid LLM API by default.** Clustering uses model2vec embeddings + k-means and composing uses rules and templates; measured on W46 against TF-IDF + k-means, MiniLM + k-means and BERTopic (plan Phase 3). The Claude engine built first stays available as `--engine llm`, off by default. |
 
 ---
 
@@ -565,9 +594,9 @@ AI Agent+MCP/
 |---|---|
 | Import 8–12 weeks of reviews (rating, title, text, date) | §4.1, §4.2, `window.weeks_back` |
 | Public reviews only, nothing behind a login (amended 2026-11-21, §13 #2) | §4.1 adapter rules, §11 |
-| At most 5 themes | §4.4 Pass A, §4.6 theme-count check |
+| At most 5 themes | §4.4 choice of k (5 or fewer), §4.6 theme-count check |
 | Pulse: top 3 themes, 3 quotes, 3 actions | §4.4 ranking, §4.5, §4.6 |
-| Verbatim quotes, no invented wording | §4.5 span-based extraction, §4.6 fidelity check |
+| Verbatim quotes, no invented wording | §4.5 sentence-span extraction by code, §4.6 fidelity check |
 | 250 words or fewer, easy to scan | §4.6 word count, §7.1 layout |
 | No PII | §4.3, §4.6 PII scan, §11 |
 | Pulse in Google Docs via MCP | §4.7 Docs flow |
