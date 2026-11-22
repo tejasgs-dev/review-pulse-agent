@@ -11,7 +11,7 @@ Build an AI agent that turns raw public app-store reviews of **Groww** (Stocks, 
 The pulse goes out through surfaces people already use:
 
 - **Google Docs** holds the written pulse.
-- **Gmail** holds a draft email to yourself (or an alias) that contains the pulse or links to it.
+- **Gmail** sends an email to yourself (or an alias) that contains the pulse and links to the Doc.
 
 Both integrations go through **MCP (Model Context Protocol) servers**. The project does not hand-roll OAuth or REST code.
 
@@ -31,9 +31,9 @@ Both integrations go through **MCP (Model Context Protocol) servers**. The proje
 ```
 ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
 │ 1. Ingest        │──▶│ 2. Theme &       │──▶│ 3. Publish       │──▶│ 4. Notify        │
-│ Pull recent Play │   │    Summarize     │   │ Write pulse to   │   │ Create Gmail     │
-│ + App Store      │   │ Cluster into ≤5  │   │ Google Docs      │   │ draft with the   │
-│ reviews (8–12    │   │ themes, distill  │   │ (via MCP)        │   │ note or a link   │
+│ Pull recent Play │   │    Summarize     │   │ Write pulse to   │   │ Send a Gmail     │
+│ + App Store      │   │ Cluster into ≤5  │   │ Google Docs      │   │ email with the   │
+│ reviews (8–12    │   │ themes, distill  │   │ (via MCP)        │   │ note and a link  │
 │ weeks)           │   │ one-page note    │   │                  │   │ (via MCP)        │
 └──────────────────┘   └──────────────────┘   └──────────────────┘   └──────────────────┘
 ```
@@ -41,7 +41,7 @@ Both integrations go through **MCP (Model Context Protocol) servers**. The proje
 1. **Pull** recent App Store and Play Store reviews for Groww, following the rules in §6.
 2. **Cluster** them into a small set of themes and distill a one-page weekly note.
 3. **Publish** that note where stakeholders can read it (Google Docs).
-4. **Draft** an email to yourself or an alias that contains or links to the pulse (Gmail).
+4. **Send** an email to yourself or an alias that contains the pulse and links to the Doc (Gmail).
 
 ---
 
@@ -61,8 +61,9 @@ The note must contain:
 - **3 user quotes**, verbatim snippets from reviews with no invented wording
 - **3 action ideas**, concrete next steps grounded in the themes
 
-### 3.4 Email draft
-- Create a **Gmail draft** addressed to yourself or an alias. It must contain the note or a clear pointer to the Google Doc.
+### 3.4 Email
+- **Send** an email to yourself or an alias (exactly one address, `PULSE_RECIPIENT`). It contains the note and a link to the Google Doc.
+- Each week is sent **once**: re-running a week that was already published sends nothing unless forced.
 
 ---
 
@@ -75,7 +76,7 @@ The note must contain:
   - [ ] 3 verbatim, anonymized user quotes
   - [ ] 3 action ideas
 - [ ] Pulse is **250 words or fewer** and easy to scan
-- [ ] Gmail draft containing the note or a link to it
+- [ ] Email sent with the note and a link to the Doc, once per week
 - [ ] No PII in any artifact
 
 ---
@@ -84,8 +85,8 @@ The note must contain:
 
 | Surface | Purpose | Integration |
 |---|---|---|
-| Google Docs | Create or update the weekly pulse document | MCP server tools |
-| Gmail | Create the draft email | MCP server tools |
+| Google Docs | Append the weekly pulse to one shared document | MCP server tools |
+| Gmail | Send the email | MCP server tools |
 
 - Use **MCP servers or connectors** that the environment provides for Docs and Gmail.
 - Do **not** make direct Google API calls (a custom OAuth client plus REST client) the main integration path.
@@ -142,5 +143,7 @@ Action Ideas
 ## 9. Source
 
 Derived from [problemStatement.txt](problemStatement.txt), which is kept unchanged as the original brief.
+
+**Amendment (2026-11-22):** the brief asked for a Gmail *draft*. The project owner changed the goal: the weekly pulse is **sent** as an email to one address, `PULSE_RECIPIENT`. All weeks go into one Google Doc that the owner created by hand (`PULSE_DOC_ID`); each week is appended under a heading such as "Week of 9 Nov 2026 (2026-W46)", and the app never creates a doc. See [architecture.md](architecture.md) §4.7.
 
 **Amendment (2026-11-21):** the brief's review-source rule read "Use public review exports only—no scraping behind store logins or ToS-violating automation." It was changed to the §6 wording above, to allow reading the public Play Store listing. The brief names that listing as the primary target, and only Groww's developers can download a Play Console export. The project owner approved this for the course project. The decision and its risk are recorded in [architecture.md](architecture.md) §13 #2.

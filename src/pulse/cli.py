@@ -16,7 +16,7 @@ from typing import Annotated
 import typer
 
 from pulse import __version__
-from pulse.config import PROJECT_ROOT, ConfigError, PulseConfig, load_config
+from pulse.config import ConfigError, PulseConfig, load_config
 from pulse.weeks import last_completed_week, parse_iso_week
 
 
@@ -31,6 +31,7 @@ class ExitCode(IntEnum):
     ANALYSIS_FAILED = 8   # the model's answers could not be made valid (Phase 3)
     LLM_FAILED = 9        # API error, refusal, or truncated response
     VALIDATION_FAILED = 10  # the composed pulse failed §4.6 after retries; nothing published
+    PUBLISH_FAILED = 11     # an MCP step failed; publish.json records what succeeded
 
 
 def _utf8_console() -> None:
@@ -46,7 +47,7 @@ _utf8_console()
 
 app = typer.Typer(
     name="pulse",
-    help="Groww Weekly Review Pulse: public reviews → one-page pulse → Google Doc + Gmail draft.",
+    help="Groww Weekly Review Pulse: public reviews → one-page pulse → Google Doc + email.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -104,7 +105,7 @@ def _load(config: Path | None) -> PulseConfig:
         raise typer.Exit(ExitCode.CONFIG_ERROR) from e
 
 
-def _not_implemented(command: str, phase: int) -> None:
+def _not_implemented(command: str, phase: int) -> None:  # kept for later phases
     typer.secho(f"`pulse {command}` is not implemented yet (planned for Phase {phase}).",
                 fg=typer.colors.YELLOW, err=True)
     raise typer.Exit(ExitCode.NOT_IMPLEMENTED)
@@ -155,7 +156,7 @@ def run(
     if dry_run:
         typer.secho("Dry run: nothing was published.", fg=typer.colors.GREEN)
         return
-    _not_implemented("run (publishing to Google Docs and Gmail)", 5)
+    _publish_stage(cfg, _week_option(week))
 
 
 @app.command()
@@ -444,16 +445,127 @@ def _usage_since(now, before) -> dict:
     return delta.to_dict()
 
 
-@app.command()
-def publish(week: WeekOpt = None, config: ConfigOpt = None) -> None:
-    """Stage 7 from saved run artifacts."""
-    _load(config)
-    _not_implemented("publish", 5)
+ForceOpt = Annotated[bool, typer.Option(
+    "--force", help="Send the email again for a week that was already sent.")]
 
 
 @app.command()
-def doctor(config: ConfigOpt = None) -> None:
-    """Check config, credentials, and MCP setup."""
+def publish(week: WeekOpt = None, force: ForceOpt = False, config: ConfigOpt = None) -> None:
+    """Stage 7 from saved run artifacts: append the week to the Google Doc (PULSE_DOC_ID), then
+    email it to PULSE_RECIPIENT. A week already published is skipped unless --force."""
+    _publish_stage(_load(config), _week_option(week), force=force)
+
+
+def _publish_stage(cfg: PulseConfig, week: str, *, force: bool = False) -> None:
+    from pulse.manifest import update_manifest
+    from pulse.publish.runner import PublishError, publish_path, publish_week
+
+    typer.echo(f"Publishing {week} through MCP (append to the Google Doc, then email "
+               f"{cfg.publish.recipient or 'PULSE_RECIPIENT'})…")
+    try:
+        record = publish_week(cfg, week, force=force, echo=typer.echo)
+    except PublishError as e:
+        if e.record:
+            update_manifest(cfg.paths.runs_path, week, "publish", _publish_summary(e.record))
+        typer.secho(f"  ✗ {e}", fg=typer.colors.RED, err=True)
+        if e.record:
+            typer.secho(f"  see {publish_path(cfg.paths.runs_path, week)}; run `pulse publish "
+                        f"--week {week}` again to resume", fg=typer.colors.RED, err=True)
+        raise typer.Exit(ExitCode.CONFIG_ERROR if e.setup and not e.record
+                         else ExitCode.PUBLISH_FAILED) from e
+    if record.get("skip_reason"):        # nothing was called; publish.json is unchanged
+        typer.secho(f"Skipped {week}: {record['skip_reason']}", fg=typer.colors.YELLOW)
+        return
+    update_manifest(cfg.paths.runs_path, week, "publish", _publish_summary(record))
+    if record["status"] == "skipped":
+        typer.secho(f"Skipped {week}: already in the Doc {record['doc_url']}",
+                    fg=typer.colors.YELLOW)
+        return
+    typer.secho(f"Published {week}: {record['doc_url']}", fg=typer.colors.GREEN)
+
+
+def _publish_summary(record: dict) -> dict:
+    """The manifest's publish section: statuses and IDs, no email body or recipient."""
+    doc, email = record.get("doc", {}), record.get("email", {})
+    return {"status": record.get("status"), "servers": record.get("servers"),
+            "doc_id": record.get("doc_id"), "doc_url": record.get("doc_url"),
+            "duplicate_check": record.get("duplicate_check"),
+            "doc": {k: doc.get(k) for k in ("status", "action")},
+            "email": {k: email.get(k) for k in ("status", "message_id")},
+            "calls": len(record.get("calls", []))}
+
+
+def _mcp_live_checks(cfg: PulseConfig, warnings: list[str], *,
+                     live: bool) -> list[tuple[str, bool, str]]:
+    """Tool map validity, then (live) health, connection and tool coverage for each server."""
+    import anyio
+
+    from pulse.publish import mcp_client as mc
+
+    try:
+        tool_map = mc.load_tool_map(cfg.mcp.tool_map_path)
+    except mc.McpSetupError as e:
+        return [("tool map is valid (send only to PULSE_RECIPIENT, never create_doc)", False,
+                 str(e).splitlines()[0])]
+    out = [("tool map is valid (send only to PULSE_RECIPIENT, never create_doc)", True, "")]
+    if not live:
+        return out
+    servers = {"docs": cfg.mcp.docs}
+    if cfg.mcp.gmail != cfg.mcp.docs:
+        servers["gmail"] = cfg.mcp.gmail
+    for name, server in servers.items():
+        label = "docs + gmail" if len(servers) == 1 else name
+        if not server.configured:
+            continue
+        if server.health_url:
+            try:
+                waited = mc.wait_until_healthy(server)
+            except mc.McpSetupError as e:
+                out.append((f"MCP server is up ({server.health_url})", False, str(e)))
+                continue
+            out.append((f"MCP server is up ({server.health_url})", True, ""))
+            if waited:
+                warnings.append(f"the MCP server took {waited}s to wake up")
+        if server.missing_headers:
+            continue          # reported above; list_tools needs the key
+        try:
+            async def tools(server=server):
+                async with mc.open_client(server) as client:
+                    return (await client.list_tools()).tools
+
+            listed = anyio.run(tools)
+        except BaseException as exc:  # noqa: BLE001 — task groups wrap the real error
+            e = mc.mcp_error(exc)
+            if e is None and not isinstance(exc, Exception):
+                raise
+            out.append((f"MCP server '{label}' answers list_tools", False, str(e or exc)))
+            continue
+        out.append((f"MCP server '{label}' answers list_tools ({len(listed)} tools)", True, ""))
+        for srv in (["docs", "gmail"] if len(servers) == 1 else [name]):
+            problems = mc.check_tools(tool_map, srv, listed)
+            out.append((f"every mapped {srv} tool exists with matching arguments",
+                        not problems, "; ".join(problems)))
+        names = {t.name for t in listed}
+        check = tool_map.spec("docs", "doc_contains_text")
+        if check is not None and check.tool not in names:
+            warnings.append(f"the server has no {check.tool!r} tool yet: duplicate sends are "
+                            "prevented only by runs/{week}/publish.json, which GitHub Actions "
+                            "does not keep (see README, 'No double sending')")
+        unmapped = sorted(n for n in names if "send" in n.lower()
+                          and n != tool_map.spec("gmail", "send_email").tool)
+        if unmapped:
+            warnings.append(f"the server also offers {', '.join(unmapped)}; it is not mapped "
+                            "and is never called")
+    return out
+
+
+@app.command()
+def doctor(
+    config: ConfigOpt = None,
+    live: Annotated[bool, typer.Option(
+        "--live/--offline", help="Reach the MCP server and check its tools.")] = True,
+) -> None:
+    """Check config, credentials, and MCP setup (and, with --live, the MCP server's tools)."""
     cfg = _load(config)
     checks: list[tuple[str, bool, str]] = [("config/pulse.yaml is valid", True, "")]
     warnings: list[str] = []
@@ -478,13 +590,15 @@ def doctor(config: ConfigOpt = None) -> None:
                             "downloads it (about 30 MB) into data/models/")
     checks.append(("PULSE_RECIPIENT is set", cfg.publish.recipient is not None,
                    "set one address in .env"))
-    checks.append(("PULSE_DOCS_FOLDER_ID is set", cfg.publish.docs_folder_id is not None,
-                   "set the Drive folder ID in .env"))
+    checks.append(("PULSE_DOC_ID is set", cfg.publish.doc_id is not None,
+                   "create the Google Doc by hand once and put its ID in .env"))
     for name, server in (("docs", cfg.mcp.docs), ("gmail", cfg.mcp.gmail)):
         checks.append((f"MCP server '{name}' is configured", server.configured,
-                       f"pending decision §13 #1: set mcp.{name} in pulse.yaml"))
-    tool_map = PROJECT_ROOT / cfg.mcp.tool_map
-    checks.append(("tool map file exists", tool_map.is_file(), str(tool_map)))
+                       f"set mcp.{name} in pulse.yaml"))
+        if server.missing_headers:
+            checks.append((f"MCP '{name}' credentials are set", False,
+                           "set PULSE_MCP_API_KEY in .env"))
+    checks.extend(_mcp_live_checks(cfg, warnings, live=live))
 
     failed = 0
     for label, ok, hint in checks:
@@ -494,7 +608,6 @@ def doctor(config: ConfigOpt = None) -> None:
         failed += not ok
     for w in warnings:
         typer.echo(f"[{typer.style('warn', fg=typer.colors.YELLOW)}] {w}")
-    typer.echo("Live checks (API call, MCP list_tools) arrive in Phase 5.")
     if failed:
         raise typer.Exit(ExitCode.DOCTOR_FAILED)
 

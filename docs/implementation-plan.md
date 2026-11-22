@@ -16,7 +16,7 @@ decisions   normalize   scrubber    clustering  validate,   publishing  & CLI   
                                                    │
                                                    ▼
                                      ★ M1: offline pulse (dry run)
-                                                               ★ M2: Doc + draft via MCP
+                                                               ★ M2: Doc + email via MCP
                                                                                    ★ M3: weekly unattended
 ```
 
@@ -44,7 +44,7 @@ Phases 1 and 2 can run in parallel once the Phase 0 data models exist. Phase 5 c
 - [x] Create the repository layout from §9: `src/pulse/…`, `tests/`, `config/`, `docs/`.
 - [x] Add `pyproject.toml` (Python 3.11+) with these dependencies: `anthropic`, `mcp`, `pydantic`, `pyyaml`, `python-dotenv`, `typer` (CLI), `httpx`, `pandas`/`pyarrow` (parquet), `langdetect`, plus `pytest` and `ruff` for development.
 - [x] Add `.gitignore` entries for `data/`, `runs/`, `.env`, and `__pycache__/`.
-- [x] Add `.env.example` listing `ANTHROPIC_API_KEY`, `PULSE_RECIPIENT`, and `PULSE_DOCS_FOLDER_ID` with no values.
+- [x] Add `.env.example` listing `ANTHROPIC_API_KEY`, `PULSE_RECIPIENT`, `PULSE_DOC_ID` and `PULSE_MCP_API_KEY` with no values.
 - [x] Create `config/pulse.yaml` with the structure in §8, plus a loader that validates it with pydantic.
 - [x] Write `models.py` with the data model from §5 (`Review`, `CleanReview`, `Theme`, `Quote`, `ActionIdea`, `Pulse`).
 - [x] Add a `pulse` CLI entry point with stub commands: `run`, `ingest`, `analyze`, `publish`, `doctor`.
@@ -359,40 +359,51 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 
 ---
 
-## Phase 5: MCP Publishing (Google Docs + Gmail) ★ M2
+## Phase 5: MCP Publishing (Google Doc + email) ★ M2
 
-**Goal:** publish the pulse to Google Docs and create a Gmail draft **only through MCP**. *(§4.7)*
+**Goal:** append the pulse to one Google Doc and **send** it by email to `PULSE_RECIPIENT`, **only through MCP**. *(§4.7)*
+
+**Change of goal (2026-11-22, project owner):** the pulse is sent, not drafted. One Google Doc, created by hand, holds every week (`PULSE_DOC_ID`); the app never calls `create_doc`. `send_email` replaces the old "refuse any send tool" rule, for this step only and only to `PULSE_RECIPIENT`.
+
+**Server (§13 #1, settled 2026-11-22):** [gworkspace-mcp](https://github.com/tejasgs-dev/GmailGdocMCPServer) on Render, one server for both Docs and Gmail, over Streamable HTTP with a bearer key (`PULSE_MCP_API_KEY` in `.env`). Used tools: `append_to_doc`, `send_email` (needs `ENABLE_SEND_EMAIL=true`), and `doc_contains_text` once it is added (README, "No double sending").
 
 ### Tasks
-- [ ] `publish/mcp_client.py`: a session manager built on the official `mcp` SDK.
-  - [ ] Connect over stdio or HTTP using the `mcp.docs` / `mcp.gmail` config; `list_tools()`; `call_tool()`; clean shutdown.
-  - [ ] Timeouts, and clear errors when a server won't start or a tool fails.
-- [ ] `publish/tool_map.yaml`: map the logical actions `find_doc`, `create_doc`, `replace_doc_body`, `move_to_folder`, `create_draft`, and optionally `update_draft` to the tools of the servers chosen in Phase 0.
-- [ ] Startup check: every mapped tool exists in `list_tools()`; **refuse any mapped tool whose name contains `send`**.
-- [ ] `publish/docs_publisher.py`: find-or-create by the title `Groww Weekly Review Pulse — {ISO week}` in the configured folder, then replace the body, then record `doc_id` and `doc_url`.
-- [ ] `publish/gmail_drafter.py`: create a draft to `PULSE_RECIPIENT` with the subject from §7.2 and a body of the pulse text plus `Full pulse: {doc_url}`. Reuse or update the existing draft ID from `publish.json` when one exists.
-- [ ] Write `runs/{week}/publish.json`, recording success or failure for each step.
-- [ ] `pulse publish --week …` publishes from saved artifacts.
-- [ ] `pulse doctor`: checks config, what the active engine needs (the cached embedding model for `local`; Anthropic credentials only for `llm`), that both MCP servers can be reached, and the tool-map coverage.
-- [ ] Tests:
-  - [ ] A **fake in-process MCP server** exposing the mapped tool names. Assert the call order, the arguments, and find-or-update behavior.
-  - [ ] Assert that a mapped `send` tool makes startup fail.
-  - [ ] Assert that resuming after a partial failure (Docs succeeded, Gmail failed) skips the Docs step.
+- [x] `publish/mcp_client.py`: built on the official `mcp` SDK (v2 `Client`).
+  - [x] Connect over stdio or Streamable HTTP from the `mcp.docs` / `mcp.gmail` config (header values are secrets, expanded from `.env`); `list_tools()`; `call_tool()`; clean shutdown. One connection when Docs and Gmail are the same server.
+  - [x] Poll `health_url` until 200 before connecting (the free Render service sleeps; `wake_timeout_seconds` 120), then connect and call with timeouts (MCP-06/07). Clear errors: a 401 names `PULSE_MCP_API_KEY`; errors wrapped in task-group exception groups are unwrapped.
+- [x] `publish/tool_map.yaml`: `docs.append_to_doc`, `docs.doc_contains_text` (optional), `gmail.send_email`, with argument templates and result patterns (`ok`, `not_found`), because this server returns text, not structured results.
+- [x] Startup check: every mapped tool exists in `list_tools()` with every argument in its input schema and every required field given (MCP-01/02); `doc_contains_text` is skipped while the server lacks it. **A tool whose name contains `send` may only be `gmail.send_email`, whose arguments must be exactly `to`/`subject`/`body`** (MCP-03); any argument that could send is refused (MCP-04); `create_doc` can never be mapped (MCP-10); `isError` or unexpected text is a failure (MCP-08).
+- [x] `config`: `publish.doc_id` from `PULSE_DOC_ID` (an ID or a Doc URL, validated); `docs_folder_id` and `doc_title` removed. Publishing stops before any call when it is missing.
+- [x] `render/markdown.render_doc_entry`: plain text (Markdown symbols stripped), a separator line, the heading `Week of 9 Nov 2026 (2026-W46)`, then the pulse without its header line.
+- [x] `publish/docs_publisher.py`: `week_in_doc` (the duplicate check, `doc_contains_text`) and `append_entry` (`append_to_doc`; a missing Doc fails clearly).
+- [x] `publish/email_sender.py`: one email to `PULSE_RECIPIENT` with the §7.2 subject and the pulse text plus `Full pulse: {doc_url}`; any other `to` is refused before the call.
+- [x] `publish/runner.py`: check → append → send. The week's heading in the Doc skips both steps; a sent email in `publish.json` skips the week unless `--force`; after a failed send, a re-run sends without appending again; `--force` re-sends but never appends a second entry.
+- [x] `runs/{week}/publish.json`, rewritten after every step (status `sent` / `skipped` / `partial` / `failed`, the duplicate check used, append and email status, message ID, hashes, per-call timings; no payloads, no key). The manifest's `publish` section holds statuses and IDs only.
+- [x] `pulse publish --week … [--force]` from saved artifacts (`pulse.md`, `pulse.json`), refusing weeks that failed validation; `pulse run` without `--dry-run` publishes after the analysis. Exit code 11 on a failed step, 2 on missing setup.
+- [x] `pulse doctor`: `PULSE_DOC_ID`, health check, credentials, `list_tools`, tool-map coverage, a warning while the server has no `doc_contains_text`, and a warning for unmapped `send` tools; `--offline` skips the network.
+- [x] Tests (`tests/test_publish.py`, against `tests/fake_mcp.py`, an in-process fake with gworkspace-mcp's exact tools and reply text, with or without `doc_contains_text`; an autouse guard stops any offline test from reaching a real server):
+  - [x] the Doc entry layout and Markdown stripping; the call order `append_to_doc → send_email`, one recipient, no cc/bcc, `create_doc` never called;
+  - [x] no double sending: a sent week makes no calls without `--force`; with `--force` only the email is sent again; a heading already in the Doc skips both steps;
+  - [x] resume after a failed send does not append again; nothing is sent when the append failed; a missing Doc fails clearly and is never created;
+  - [x] bad tool maps are refused (send tools elsewhere, cc/bcc, `create_doc`, `send_now`); a slow tool times out; unvalidated weeks and a missing Doc ID, recipient or key make no calls; the key never reaches `publish.json`.
+- [ ] Add `doc_contains_text` to gworkspace-mcp (README, "No double sending") and redeploy, so GitHub Actions cannot send a week twice.
 
 ### Deliverables
-- **M2:** one command that turns real reviews into a Google Doc and a Gmail draft.
+- **M2:** one command that turns real reviews into an entry in the shared Google Doc and an email in the recipient's inbox.
+
+*Status (2026-11-22): built and tested offline against a fake of the chosen server. The first live run is `pulse doctor` then `pulse publish --week 2026-W46`.*
 
 ### Exit criteria
-- A live run creates the Doc in the right folder and a draft addressed to the configured recipient that contains the note and the Doc link.
-- Re-running the same week updates the same Doc and does not create a second draft.
+- A live run appends the week's entry to the shared Doc and sends one email to the configured recipient that contains the note and the Doc link.
+- Re-running the same week sends nothing and appends nothing (without `--force`).
 - `grep` shows no Google REST endpoints and no OAuth client code anywhere in `src/`.
-- No email is sent at any point.
+- No email goes to any address other than `PULSE_RECIPIENT`, and no doc is ever created.
 
 ### Risks
 | Risk | Mitigation |
 |---|---|
-| The chosen MCP server has no "find by title" or "replace body" tool | Fall back to storing `doc_id` in `publish.json` (and listing the folder if possible), or to append-after-clear; record the choice in `tool_map.yaml` |
-| The Gmail MCP server has no draft-update tool | Delete and recreate the draft if supported; otherwise skip and log |
+| The server cannot check a doc's text, so Actions (no `runs/`) could send a week twice | Add the read-only `doc_contains_text` tool to the server; until then, run publishing where `runs/` is kept, and `pulse doctor` warns |
+| The send fails after the append, on Actions with the Doc check | The run fails visibly; `pulse publish --week … --force` sends the email without appending again |
 | MCP OAuth tokens expire during unattended runs | `pulse doctor` runs before each scheduled run; document how to re-authenticate |
 
 ---
@@ -419,7 +430,7 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 
 ### Exit criteria
 - A simulated failure test for each row of §10 behaves as specified.
-- Two identical runs in a row produce one Doc, one draft, and stable artifacts.
+- Two identical runs in a row produce one Doc entry, one email, and stable artifacts.
 
 ---
 
@@ -436,7 +447,7 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 - [ ] Tune the theme catalogue (labels, keywords, templates), the praise/specific/vague word lists, and the ranking weights based on that feedback. For the LLM engine, tune and version the prompts.
 
 ### Deliverables
-- **M3:** a weekly Doc and Gmail draft that appear without anyone running anything.
+- **M3:** a weekly Doc entry and email that appear without anyone running anything.
 - A short notes file of what was tuned after the first runs.
 
 ### Exit criteria
@@ -469,7 +480,7 @@ Pick from these once M3 is stable:
 | Top 3 themes, 3 verbatim quotes, 3 action ideas | 3, 4 |
 | 250 words or fewer, easy to scan | 4 |
 | Pulse in Google Docs via MCP | 5 |
-| Gmail draft to self or alias via MCP | 5 |
+| Email sent to self or alias via MCP | 5 |
 | MCP-first, no hand-written Google OAuth or REST | 5 (enforced by exit criteria) |
 | Weekly cadence | 7 |
 
@@ -477,7 +488,7 @@ Pick from these once M3 is stable:
 
 ## Definition of Done (Project)
 
-- [ ] `pulse run` turns live public reviews into a Google Doc and a Gmail draft, through MCP only.
+- [ ] `pulse run` turns live public reviews into a Doc entry and a sent email, through MCP only.
 - [ ] Every validator check in §4.6 passes on each published run.
 - [ ] The test suite (unit, contract, fake-MCP, dry-run end-to-end) passes in CI.
 - [ ] The README lets a new developer set up and run the project from scratch.

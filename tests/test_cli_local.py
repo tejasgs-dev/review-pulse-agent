@@ -54,7 +54,7 @@ def test_engine_option_is_validated(tmp_config):
 
 def test_doctor_checks_the_local_engine(tmp_config, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-    result = runner.invoke(app, ["doctor", "--config", str(tmp_config())])
+    result = runner.invoke(app, ["doctor", "--offline", "--config", str(tmp_config())])
     assert "analysis engine: local" in result.output
     assert "theme catalogue is valid" in result.output
     assert "ANTHROPIC_API_KEY" not in result.output      # not needed by the local engine
@@ -64,5 +64,5 @@ def test_doctor_checks_the_local_engine(tmp_config, monkeypatch):
 def test_doctor_checks_the_api_key_for_the_llm_engine(tmp_config, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     path = tmp_config(lambda d: d["analysis"].__setitem__("engine", "llm"))
-    result = runner.invoke(app, ["doctor", "--config", str(path)])
+    result = runner.invoke(app, ["doctor", "--offline", "--config", str(path)])
     assert "ANTHROPIC_API_KEY is set (LLM engine)" in result.output

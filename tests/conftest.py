@@ -30,6 +30,9 @@ def play_row(*, rid: str, rating: str, text: str, submitted: str, updated: str =
     ]
 
 
+# The shared Doc in publishing tests (the fake server starts with it, as if made by hand).
+TEST_DOC_ID = "TestDoc_0123456789abcdefghij"
+
 # Default review text: English and longer than the 9-word minimum.
 LONG_TEXT = "Works well for me daily and the mutual fund screens are easy to use"
 
@@ -114,3 +117,56 @@ def _no_real_embedder(request, monkeypatch):
 
     monkeypatch.setattr("pulse.analysis.engines.local_cluster.build_embedder",
                         lambda cfg: HashingEmbedder())
+
+
+@pytest.fixture(autouse=True)
+def _no_real_mcp(request, monkeypatch):
+    """Offline tests never reach a real MCP server (it would write to a real Google Doc and
+    send real email). Tests that publish use the `fake_mcp` fixture instead."""
+    if request.node.get_closest_marker("slow"):
+        return
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("tests must not reach a real MCP server; use the fake_mcp fixture")
+
+    monkeypatch.setattr("pulse.publish.mcp_client.open_client", refuse)
+    monkeypatch.setattr("pulse.publish.mcp_client.wait_until_healthy", refuse)
+
+
+@pytest.fixture
+def fake_mcp(monkeypatch):
+    """An in-process fake of gworkspace-mcp wired in place of the real connection."""
+    from contextlib import asynccontextmanager
+
+    from mcp import Client
+
+    from tests.fake_mcp import FakeWorkspace
+
+    ws = FakeWorkspace()
+    ws.docs[TEST_DOC_ID] = {"title": "Groww Weekly Review Pulse",
+                            "content": "Groww Weekly Review Pulse\n"}
+    ws.connections = 0
+
+    @asynccontextmanager
+    async def open_client(server):
+        ws.connections += 1
+        async with Client(ws.server()) as client:
+            yield client
+
+    monkeypatch.setattr("pulse.publish.mcp_client.open_client", open_client)
+    monkeypatch.setattr("pulse.publish.mcp_client.wait_until_healthy", lambda server: 0.0)
+    return ws
+
+
+@pytest.fixture
+def publish_config(tmp_config, monkeypatch):
+    """A config ready to publish: a recipient, the Doc ID and an API key, with the fake
+    server."""
+    monkeypatch.setenv("PULSE_RECIPIENT", "me@example.com")
+    monkeypatch.setenv("PULSE_MCP_API_KEY", "test-key-0123456789-0123456789-xyz")
+    monkeypatch.setenv("PULSE_DOC_ID", TEST_DOC_ID)
+
+    def make(mutate=None) -> Path:
+        return tmp_config(mutate)
+
+    return make

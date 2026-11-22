@@ -9,7 +9,7 @@ from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "pulse.yaml"
@@ -178,15 +178,38 @@ class LlmConfig(_Strict):
     fallbacks: str | None = "default"
 
 
-class PublishConfig(_Strict):
-    docs_folder_id: str | None = None
-    recipient: str | None = None
-    doc_title: str
+_DOC_URL = re.compile(r"/document/(?:u/\d+/)?d/([A-Za-z0-9_-]+)")
+_DOC_ID = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 
-    @field_validator("docs_folder_id", "recipient", mode="before")
+
+class PublishConfig(_Strict):
+    """Where the weekly pulse goes (architecture §4.7): one Google Doc, made by hand once and
+    appended to every week, and one email recipient. The app never creates a doc."""
+
+    doc_id: str | None = None
+    recipient: str | None = None
+
+    @field_validator("doc_id", "recipient", mode="before")
     @classmethod
     def _blank_is_none(cls, v: object) -> object:
         return None if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("doc_id")
+    @classmethod
+    def _doc_id(cls, v: str | None) -> str | None:
+        """A Doc ID, or a docs.google.com URL (the ID is taken from it)."""
+        if v is None:
+            return v
+        v = v.strip()
+        m = _DOC_URL.search(v)
+        v = m.group(1) if m else v
+        if not _DOC_ID.match(v):
+            raise ValueError("doc_id (PULSE_DOC_ID) must be a Google Doc ID or URL")
+        return v
+
+    @property
+    def doc_url(self) -> str | None:
+        return f"https://docs.google.com/document/d/{self.doc_id}/edit" if self.doc_id else None
 
     @field_validator("recipient")
     @classmethod
@@ -196,29 +219,52 @@ class PublishConfig(_Strict):
             raise ValueError("recipient must be exactly one valid email address")
         return v.strip() if v else v
 
-    @field_validator("doc_title")
-    @classmethod
-    def _has_week(cls, v: str) -> str:
-        if "{iso_week}" not in v:
-            raise ValueError("doc_title must contain {iso_week} so each week gets its own doc")
-        return v
-
 
 class McpServerConfig(_Strict):
+    """How to reach one MCP server (architecture §4.7): a local command (stdio) or a URL
+    (Streamable HTTP). Header values usually come from .env (`${PULSE_MCP_API_KEY}`) and are
+    kept as secrets, so they never appear in logs, reprs or run artifacts."""
+
     transport: Literal["stdio", "http"] = "stdio"
     command: str = ""
     args: list[str] = Field(default_factory=list)
     url: str | None = None
+    headers: dict[str, SecretStr] = Field(default_factory=dict)
+    # HTTP only: polled until it answers 200 before connecting (a free Render service sleeps
+    # after 15 idle minutes and can take about a minute to wake).
+    health_url: str | None = None
+    wake_timeout_seconds: float = Field(default=120, gt=0)
+    connect_timeout_seconds: float = Field(default=60, gt=0)
+    call_timeout_seconds: float = Field(default=90, gt=0)   # MCP-07: never hang on a call
+
+    @field_validator("url", "health_url", mode="before")
+    @classmethod
+    def _blank_url_is_none(cls, v: object) -> object:
+        return None if isinstance(v, str) and not v.strip() else v
 
     @property
     def configured(self) -> bool:
         return bool(self.url) if self.transport == "http" else bool(self.command.strip())
+
+    @property
+    def missing_headers(self) -> list[str]:
+        """Headers whose value is empty after ${VAR} expansion (e.g. 'Bearer ' with no key)."""
+        out = []
+        for name, value in self.headers.items():
+            v = value.get_secret_value().strip()
+            if not v or v.lower() in ("bearer", "basic"):
+                out.append(name)
+        return out
 
 
 class McpConfig(_Strict):
     docs: McpServerConfig
     gmail: McpServerConfig
     tool_map: str
+
+    @property
+    def tool_map_path(self) -> Path:
+        return _resolve(self.tool_map)
 
 
 class PulseConfig(_Strict):

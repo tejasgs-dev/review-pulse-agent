@@ -1,13 +1,49 @@
-# Logical publish actions -> concrete MCP tool names (architecture §4.7).
-# Fill in once the Docs and Gmail MCP servers are chosen (§13 #1).
-# Any tool whose name contains "send" is refused at startup.
+# Logical publish actions -> concrete MCP tools (architecture §4.7).
+#
+# Server: gworkspace-mcp (github.com/tejasgs-dev/GmailGdocMCPServer), one server for Docs and
+# Gmail. Moving to another server means editing only this file and `mcp:` in pulse.yaml.
+#
+# Publishing a week = append that week's entry to one existing Doc (PULSE_DOC_ID), then send
+# one email to PULSE_RECIPIENT with the pulse text and the Doc link. No doc is ever created.
+#
+# Each action has:
+#   tool       the server's tool name.
+#   args       tool arguments. A value that is exactly "{name}" is replaced by the publisher's
+#              value (doc_id, content, text, to, subject, body); anything else is passed as
+#              written.
+#   ok         regex that a successful result text matches; named groups (title, message_id)
+#              are read from it.
+#   not_found  optional regex for "the thing does not exist" (not an error by itself).
+# A result that matches neither, or that has isError set, is a failed step (MCP-08). This
+# server reports errors as plain text ("Invalid input: ...", "Permission denied ..."), so the
+# `ok` patterns are anchored on the exact success wording.
+#
+# Safety rules, checked when this file loads:
+#   - only gmail.send_email may map a tool whose name contains "send" (MCP-03), and it takes
+#     exactly to/subject/body from the publisher; `to` is always PULSE_RECIPIENT;
+#   - no argument name may contain "send" (MCP-04);
+#   - create_doc can never be mapped (MCP-10).
+# At startup every mapped tool must exist in list_tools(), every argument must be in the
+# tool's input schema, and every required schema field must be given (MCP-01, MCP-02).
+# doc_contains_text is the one exception: until the server has it, it is skipped and the
+# publisher relies on runs/{week}/publish.json to avoid sending twice.
 
 docs:
-  find_doc: null
-  create_doc: null
-  replace_doc_body: null
-  move_to_folder: null
+  append_to_doc:
+    tool: append_to_doc
+    args: { document_id: "{doc_id}", content: "{content}", add_newline_before: true }
+    ok: "^Appended (?P<count>\\d+) characters to '(?P<title>.*)'\\.$"
+    not_found: "^Document not found"
+  # Read-only duplicate check: is this week's heading already in the doc? Add the tool to the
+  # server first (see README, "No double sending").
+  doc_contains_text:
+    tool: doc_contains_text
+    args: { document_id: "{doc_id}", text: "{text}" }
+    ok: "^Text found in '(?P<title>.*)'\\.$"
+    not_found: "^Text not found in '"
 
 gmail:
-  create_draft: null
-  update_draft: null      # optional
+  send_email:
+    tool: send_email
+    args: { to: "{to}", subject: "{subject}", body: "{body}" }
+    ok: "^Email sent to (?P<to>\\S+) \\(message id: (?P<message_id>[A-Za-z0-9_-]+)\\)$"

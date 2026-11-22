@@ -18,9 +18,10 @@ def test_version():
     assert "0.1.0" in result.output
 
 
-def test_publish_is_not_implemented_yet(tmp_config):
+def test_publish_refuses_a_week_with_no_pulse(tmp_config):
     result = runner.invoke(app, ["publish", "--week", "2026-W47", "--config", str(tmp_config())])
-    assert result.exit_code == ExitCode.NOT_IMPLEMENTED
+    assert result.exit_code == ExitCode.CONFIG_ERROR
+    assert "no composed pulse yet" in result.output
 
 
 def test_run_dry_run_end_to_end(tmp_config, tmp_path, monkeypatch):
@@ -48,14 +49,21 @@ def test_run_dry_run_end_to_end(tmp_config, tmp_path, monkeypatch):
     assert not (week / "failure.json").exists()
 
 
-def test_run_without_dry_run_stops_before_publishing(tmp_config, tmp_path, monkeypatch):
-    path = tmp_config(lambda d: d["analysis"].__setitem__("min_reviews", 2))
+def test_run_without_dry_run_publishes_through_mcp(publish_config, tmp_path, monkeypatch,
+                                                   fake_mcp):
+    path = publish_config(lambda d: d["analysis"].__setitem__("min_reviews", 2))
     _store_three_reviews(tmp_path)
     _fake_llm(monkeypatch)
     result = runner.invoke(app, ["run", "--week", "2026-W47", "--skip-ingest",
                                  "--engine", "llm", "--config", str(path)])
-    assert result.exit_code == ExitCode.NOT_IMPLEMENTED
-    assert (tmp_path / "runs" / "2026-W47" / "pulse.md").exists()
+    assert result.exit_code == ExitCode.OK, result.output
+    assert fake_mcp.tool_names() == ["append_to_doc", "send_email"]
+    (doc,) = fake_mcp.docs.values()
+    assert "Week of 16 Nov 2026 (2026-W47)" in doc["content"]
+    assert "Top Themes" in doc["content"]
+    (mail,) = fake_mcp.sent
+    assert mail["to"] == "me@example.com"
+    assert "Published 2026-W47" in result.output
 
 
 def test_run_writes_failure_json_when_validation_keeps_failing(tmp_config, tmp_path,
@@ -101,11 +109,12 @@ def test_weeks_back_range_enforced():
 
 
 def test_doctor_reports_missing_setup(monkeypatch):
-    for var in ("ANTHROPIC_API_KEY", "PULSE_RECIPIENT", "PULSE_DOCS_FOLDER_ID"):
+    for var in ("ANTHROPIC_API_KEY", "PULSE_RECIPIENT", "PULSE_DOC_ID"):
         monkeypatch.setenv(var, "")
-    result = runner.invoke(app, ["doctor"])
+    result = runner.invoke(app, ["doctor", "--offline"])
     assert result.exit_code == ExitCode.DOCTOR_FAILED
     assert "MCP server 'docs' is configured" in result.output
+    assert "[FAIL] PULSE_DOC_ID is set" in result.output
 
 
 def _store_three_reviews(tmp_path):

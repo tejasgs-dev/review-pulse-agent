@@ -121,11 +121,24 @@ llm:
   fallbacks: default
 
 publish:
-  docs_folder_id: ${PULSE_DOCS_FOLDER_ID}
+  # One Google Doc, created by hand once. Each week's pulse is appended to it under a heading
+  # like "Week of 9 Nov 2026 (2026-W46)"; the app never creates a doc.
+  doc_id: ${PULSE_DOC_ID}
+  # The only address the pulse is emailed to (send_email is refused for any other).
   recipient: ${PULSE_RECIPIENT}
-  doc_title: "Groww Weekly Review Pulse — {iso_week}"
 
-mcp:                                # filled in once §13 #1 is settled
-  docs:  { transport: stdio, command: "", args: [] }
-  gmail: { transport: stdio, command: "", args: [] }
+# §13 #1 (decided 2026-11-22): one remote server, gworkspace-mcp
+# (github.com/tejasgs-dev/GmailGdocMCPServer), serves both Docs and Gmail over Streamable HTTP.
+# send_email must be enabled on it (ENABLE_SEND_EMAIL=true), and it only sends mail to its own
+# ALLOWED_RECIPIENTS, which must include PULSE_RECIPIENT. The key comes from .env.
+mcp:
+  docs: &gworkspace
+    transport: http
+    url: https://gworkspace-mcp.onrender.com/mcp
+    health_url: https://gworkspace-mcp.onrender.com/healthz
+    headers: { Authorization: "Bearer ${PULSE_MCP_API_KEY}" }
+    wake_timeout_seconds: 120         # the free Render service sleeps after 15 idle minutes
+    connect_timeout_seconds: 60
+    call_timeout_seconds: 90
+  gmail: *gworkspace
   tool_map: src/pulse/publish/tool_map.yaml

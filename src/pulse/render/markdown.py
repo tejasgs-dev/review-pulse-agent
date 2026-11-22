@@ -21,6 +21,7 @@ Layout (§7.1):
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import date
 
@@ -147,6 +148,34 @@ def render_doc(pulse: Pulse, *, product: str, min_words: int) -> str:
     """The Google Doc text, also saved as runs/{week}/pulse.md."""
     return (render_preamble(pulse, product=product, min_words=min_words) + "\n\n"
             + render_body(pulse) + "\n")
+
+
+DOC_SEPARATOR = "─" * 40
+_MARKDOWN_LEAD = re.compile(r"^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+(?=\S))")
+_MARKDOWN_INLINE = re.compile(r"\*\*|__|`")
+
+
+def week_heading(week: str) -> str:
+    """'Week of 9 Nov 2026 (2026-W46)': the heading of a week's entry in the shared Doc. It
+    holds the ISO week, so finding it in the Doc means that week was already published."""
+    return f"{week_of(week)} ({week})"
+
+
+def plain_text(text: str) -> str:
+    """Drop Markdown markup (headings, quote marks, list markers, bold, code ticks), so the Doc
+    shows plain text. Lines that start with "• " or "1. " are kept: they are plain text too."""
+    return "\n".join(_MARKDOWN_INLINE.sub("", _MARKDOWN_LEAD.sub(
+        lambda m: "• " if m.group(0).strip() in "-*+" else "", line))
+        for line in text.splitlines())
+
+
+def render_doc_entry(week: str, doc_text: str) -> str:
+    """The text appended to the shared Doc for one week: a separator line, the week heading,
+    then the pulse without its own header line (the heading replaces it)."""
+    lines = plain_text(doc_text).strip("\n").splitlines()
+    if lines and "Weekly Review Pulse" in lines[0]:
+        lines = lines[1:]
+    return "\n".join([DOC_SEPARATOR, week_heading(week), *lines]).rstrip() + "\n"
 
 
 def render_email(pulse: Pulse, *, product: str, min_words: int,

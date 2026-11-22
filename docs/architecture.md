@@ -10,7 +10,7 @@
 - Turn 8–12 weeks of public Groww reviews (Play Store and App Store) into a one-page weekly pulse of 250 words or fewer.
 - Make sure every quote in the pulse is **verbatim** and every artifact is **free of PII**. Code enforces both rules; neither depends on a model.
 - Run with **no paid API and no review text leaving the machine** by default: theme clustering uses local machine learning, and the pulse is composed by rules and templates. The Claude API is an optional engine (`--engine llm`), off by default.
-- Publish the pulse to **Google Docs** and create a **Gmail draft** through **MCP servers only**.
+- Append the pulse to **one Google Doc** and **send it by Gmail** to one address, through **MCP servers only**.
 - Re-running the same week updates that week's pulse and does not create duplicates.
 - Run unattended once a week, and also on demand from the command line.
 
@@ -32,7 +32,7 @@
  │ Play Store public │──▶│  │ Ingest  │─▶│ Analyze │─▶│ Publish   │──┼─▶│ Google Docs MCP  │──▶ Google Docs
  │ listing (scraper) │   │  │ + PII   │  │ local   │  │ (MCP      │  │  └──────────────────┘
  ├───────────────────┤   │  │ scrub   │  │ ML      │  │  client)  │  │  ┌──────────────────┐
- │ App Store public  │──▶│  └─────────┘  └─────────┘  └───────────┘──┼─▶│ Gmail MCP        │──▶ Gmail draft
+ │ App Store public  │──▶│  └─────────┘  └─────────┘  └───────────┘──┼─▶│ Gmail MCP        │──▶ Email sent
  │ RSS feed (JSON)   │   │        │            │             │       │  └──────────────────┘
  └───────────────────┘   │        ▼            ▼             ▼       │
                          │   ┌──────────────────────────────────┐    │
@@ -51,7 +51,7 @@
 | Local embedding model `minishlab/potion-base-8M` (model2vec) | Sentence embeddings for clustering and quote ranking | Downloaded once from Hugging Face (free, about 30 MB), pinned by revision, cached in `data/models/`, runs on CPU |
 | Claude API *(optional)* | Clustering and composing with `--engine llm` only | Anthropic Python SDK (`pip install -e .[llm]`) |
 | Google Docs MCP server | Create or update the pulse document | MCP tools |
-| Gmail MCP server | Create the draft email | MCP tools |
+| Gmail MCP server | Send the email to `PULSE_RECIPIENT` | MCP tools |
 
 ---
 
@@ -77,7 +77,7 @@ The system is a **code-orchestrated workflow**, not an open-ended agent. The ste
 | 4 | **Cluster** | `CleanReview[]` | Up to 5 `Theme`s plus review→theme assignments | Local embeddings + k-means (Claude with `--engine llm`) |
 | 5 | **Compose** | Top 3 themes, candidate quotes | `Pulse` draft (structured) | Rules + templates (Claude with `--engine llm`) |
 | 6 | **Validate** | `Pulse` | Pass, or a list of errors to fix | No |
-| 7 | **Publish** | `Pulse` | Google Doc URL and Gmail draft ID | No (MCP tool calls) |
+| 7 | **Publish** | `Pulse` | Entry appended to the shared Doc, email message ID | No (MCP tool calls) |
 
 ---
 
@@ -222,22 +222,31 @@ The app is an **MCP client** that uses the official MCP Python SDK. It starts or
 ```
 publish/
 ├── mcp_client.py      # Session management: connect, list_tools, call_tool, close
-├── docs_publisher.py  # Maps a Pulse to Docs MCP tool calls
-├── gmail_drafter.py   # Maps a Pulse + Doc URL to a Gmail MCP draft call
+├── docs_publisher.py  # Duplicate check and append of the week's entry to the shared Doc
+├── email_sender.py    # Sends the pulse + Doc link to PULSE_RECIPIENT
+├── runner.py          # The publish flow and publish.json
 └── tool_map.yaml      # Logical action → concrete tool name/args for the chosen server
 ```
 
-**Why `tool_map.yaml`:** different Google Workspace MCP servers name their tools differently, for example `create_document` or `docs_create`. Publisher code calls *logical* actions (`find_doc`, `create_doc`, `replace_doc_body`, `create_draft`). A small mapping file resolves them to the tools of whichever server is configured. At startup, `list_tools()` checks that every mapped tool exists and stops early if one is missing.
+**Why `tool_map.yaml`:** different Google Workspace MCP servers name their tools differently, for example `append_text` or `docs_append`. Publisher code calls *logical* actions (`doc_contains_text`, `append_to_doc`, `send_email`). A small mapping file resolves them to the tools of whichever server is configured. At startup, `list_tools()` checks that every mapped tool exists and stops early if one is missing (`doc_contains_text` is optional: see below).
 
-**Docs flow (idempotent per week):**
-1. `find_doc(title="Groww Weekly Review Pulse — {ISO week}")` inside the configured Drive folder.
-2. If found, `replace_doc_body(doc_id, content)`. If not, `create_doc(title, content)`, then move it to the folder.
-3. Record `doc_id` and `doc_url` in `runs/{week}/publish.json`.
+**One shared Doc.** The project owner creates one Google Doc by hand and puts its ID in `PULSE_DOC_ID` (`publish.doc_id`; a Doc URL is accepted too). Every week is appended to it. **The app never creates a doc:** `create_doc` cannot be mapped, and publishing stops before any call if `PULSE_DOC_ID` is missing.
 
-**Gmail flow:**
-1. `create_draft(to=<PULSE_RECIPIENT>, subject="Groww Review Pulse — Week of {date}", body=<pulse text + Doc link>)`.
-2. **Only create a draft, never send.** The tool map has no send action, and the publisher refuses any tool whose name includes `send`.
-3. If a draft ID already exists for this week in `publish.json`, the run updates or replaces that draft (when the server supports it) or skips creating a new one.
+**Publish flow (one week):**
+1. **Duplicate check.** The week's heading is `Week of {Monday} ({ISO week})`, for example `Week of 9 Nov 2026 (2026-W46)`.
+   - If the server has the read-only `doc_contains_text` tool, call `doc_contains_text(doc_id, heading)`. Found → skip both steps (status `skipped`). This works without `runs/`, so it is the guard on GitHub Actions.
+   - Until the server has that tool, `runs/{week}/publish.json` is the guard: a week whose email was sent is not sent again without `--force`.
+2. **Append** with `append_to_doc(doc_id, entry)`. The entry is plain text (no Markdown symbols): a separator line (`────…`), the heading, then the pulse without its own header line (`render/markdown.render_doc_entry`). Skipped when the entry is already there (found in the Doc, or recorded in `publish.json`).
+3. **Send** with `send_email(to=<PULSE_RECIPIENT>, subject="Groww Review Pulse — Week of {date}", body=<pulse text + "Full pulse: " + Doc link>)`. Never runs if the append failed.
+4. `publish.json` is rewritten after every step. If the send fails after the append, the next run sends without appending again. With `--force`, the email is sent again; the entry is still appended only when it is missing.
+
+**Sending rules.** `send_email` is the only sending tool the app may call, only for step 3, and only to `PULSE_RECIPIENT`:
+- a tool whose name contains `send` may be mapped only to the `gmail.send_email` action (MCP-03);
+- that action's arguments must be exactly `to`, `subject` and `body` from the publisher (no `cc`, `bcc` or fixed values);
+- `email_sender.send_pulse` refuses any `to` other than the one configured address;
+- the server also restricts recipients to its own `ALLOWED_RECIPIENTS`.
+
+**Known gap (GitHub Actions, until `doc_contains_text` exists):** with no `runs/` kept, nothing stops a second scheduled run for the same week from sending again. With the tool, a failed send after a successful append is not retried automatically on Actions (the heading is already in the Doc). The run fails, so it is visible, and `pulse publish --week … --force` sends it.
 
 **Auth:** MCP servers handle Google OAuth and their own token storage. The app never reads or stores Google credentials. It only knows how to start or reach the servers (command, args, URL), which it gets from config.
 
@@ -354,7 +363,7 @@ runs/{iso_week}/
 ├── pulse.json                    # structured Pulse
 ├── pulse.md                      # rendered note (what goes into Docs and email)
 ├── validation.json               # check results
-├── publish.json                  # doc_id, doc_url, draft_id, timestamps
+├── publish.json                  # doc_id, heading, append + email status, message_id, timestamps
 ├── failure.json                  # only when a run stopped before publishing
 └── llm/                          # LLM engine only: request/response logs (scrubbed text only)
 ```
@@ -389,9 +398,22 @@ Action Ideas
 ```
 *(These themes and numbers are examples of the layout only, not real findings, except the source line, which shows the real 2026-W46 counts. "Week of" is the Monday of the ISO week. Shares come from `themes.json` and are inserted by the renderer; a non-zero share under 0.5% shows as `<1%`. The golden-file test, `tests/fixtures/golden_pulse.md`, pins this layout. The "19% general praise" figure is a rough keyword estimate until Phase 3 produces the real share. The line is built by `render/markdown.source_line`, which always states the cleaning rules from config ("9+ words, English only") and adds the `general_praise` share from `themes.json` (§4.4), so a mostly negative pulse still shows how many reviewers were simply happy. The source line does not count toward the 250-word limit.)*
 
-### 7.2 Gmail draft
+### 7.2 Doc entry and email
 
-- **To:** `PULSE_RECIPIENT` from config (yourself or an alias)
+**Doc entry** (appended to the shared Doc, plain text):
+
+```
+────────────────────────────────────────
+Week of 9 Nov 2026 (2026-W46)
+Source: 1,348 reviews (…)
+
+Top Themes
+…
+```
+
+**Email** (sent, not drafted):
+
+- **To:** `PULSE_RECIPIENT` from config (yourself or an alias), exactly one address
 - **Subject:** `Groww Review Pulse — Week of {date}`
 - **Body:** the same rendered note in plain text, followed by `Full pulse: {doc_url}`
 
@@ -455,9 +477,8 @@ llm:                                # used only with --engine llm
   fallbacks: default
 
 publish:
-  docs_folder_id: ${PULSE_DOCS_FOLDER_ID}
+  doc_id: ${PULSE_DOC_ID}           # the one Doc, made by hand; the app never creates one
   recipient: ${PULSE_RECIPIENT}
-  doc_title: "Groww Weekly Review Pulse — {iso_week}"
 
 mcp:
   docs:  { transport: stdio, command: "<server cmd>", args: [] }
@@ -468,8 +489,9 @@ mcp:
 | Env var | Purpose |
 |---|---|
 | `ANTHROPIC_API_KEY` *(or an `ant auth login` profile)* | Claude API credentials, **only for `--engine llm`**; the default engine needs none |
-| `PULSE_RECIPIENT` | Draft recipient (self or alias), never hardcoded |
-| `PULSE_DOCS_FOLDER_ID` | Target Drive folder for the pulse docs |
+| `PULSE_RECIPIENT` | The one email recipient (self or alias), never hardcoded |
+| `PULSE_DOC_ID` | The shared Google Doc the pulse is appended to (ID or URL) |
+| `PULSE_MCP_API_KEY` | Bearer key for the MCP server |
 
 ---
 
@@ -513,7 +535,8 @@ AI Agent+MCP/
 │   └── publish/
 │       ├── mcp_client.py
 │       ├── docs_publisher.py
-│       ├── gmail_drafter.py
+│       ├── email_sender.py
+│       ├── runner.py
 │       └── tool_map.yaml
 ├── tests/
 │   ├── fixtures/                 # synthetic reviews, no real user data
@@ -541,8 +564,9 @@ AI Agent+MCP/
 | *(Local engine)* No stable k ≥ 3, or `other` above 25% after the retry | Stop with `RankError` / record `other_share_high`, as for the LLM engine. |
 | Validator fails (quotes, word count, PII) | The composer tries its next option (rules) or re-prompts (LLM), at most 2 times. **Nothing is published** on a final failure. |
 | MCP server unreachable or tool missing | `pulse doctor` and startup checks report it clearly. Analysis results are kept, so `pulse publish` can be re-run later. |
-| Docs succeeds but Gmail fails | `publish.json` records partial success, and re-running `pulse publish` resumes from the Gmail step. |
-| Duplicate run for the same week | Find-or-update on the Doc title; existing draft ID in `publish.json` prevents a second draft. |
+| Docs succeeds but Gmail fails | `publish.json` records partial success, and re-running `pulse publish` sends the email without appending again. |
+| Duplicate run for the same week | The week's heading in the Doc (`doc_contains_text`) or a sent email in `publish.json` skips both steps; `--force` re-sends. |
+| `PULSE_DOC_ID` missing or wrong | Missing: stop before any call. Wrong or not shared: `append_to_doc` fails clearly and nothing is sent; no doc is ever created. |
 
 ---
 
@@ -552,7 +576,7 @@ AI Agent+MCP/
 - **Two PII gates:** redaction before analysis, and a scan of the final output that blocks publishing on any hit (§4.3, §4.6).
 - **Known gap: personal names.** Neither PII gate detects names (PII-11). The quote picker skips reviews that probably name a person (a rule-based name filter by default, a prompt rule in the LLM engine), and humans review the first pulses (Phase 7).
 - **No Google credentials in the app:** OAuth tokens live with the MCP servers. The default engine needs no credential at all; `--engine llm` needs an Anthropic credential.
-- **Draft only:** the Gmail publisher cannot send email (§4.7).
+- **Send to one address only:** `send_email` is called only for the publish step and only to `PULSE_RECIPIENT`; the tool map cannot add recipients (§4.7).
 - **Secrets:** environment variables or `.env` only. `.env.example` documents the variable names without values.
 - **Store compliance:** nothing behind a login is ever read. The App Store feed is a public feed. The Play Store listing reader was approved by the project owner for this course project (§13 #2); it is public-only, throttled, bounded by the window and `max_reviews`, and can be switched off (`ingest.play_public.enabled: false`) to fall back to export files.
 - **Logs:** LLM request and response logs (LLM engine only) hold scrubbed text only and stay in git-ignored `runs/`.
@@ -568,7 +592,7 @@ AI Agent+MCP/
 | Local clustering | Praise rule, routing, choice of k, labels, determinism (two runs give identical `themes.json`) | pytest with a stub embedding function (no download); a `@slow` check with the real model on fixtures, free |
 | Rules composer | Name filter, quote scoring, templates, fallbacks | pytest with synthetic candidates |
 | LLM integration *(optional engine)* | Clustering returns 5 or fewer themes, every review is assigned, schema is valid | Fake model offline; `@slow` live tests on demand (they cost money) |
-| MCP integration | Logical actions map to tool calls, find-or-update behavior, refusal of `send` tools | A fake in-process MCP server exposing the same tool names |
+| MCP integration | Logical actions map to tool calls, append-then-send order, no double sending, `--force`, refusal of other `send` tools and of `create_doc` | A fake in-process MCP server exposing the same tool names |
 | End-to-end | `pulse run --dry-run` on fixtures produces a valid `pulse.md` | CI on every PR |
 | Quality eval *(later)* | Theme coherence and usefulness of actions | Small labeled set plus human review of the first few weekly pulses |
 
@@ -578,7 +602,7 @@ AI Agent+MCP/
 
 | # | Decision | Options | Current leaning | Status (2026-11-22) |
 |---|---|---|---|---|
-| 1 | Which Docs and Gmail MCP servers | A community Google Workspace MCP server (stdio), a hosted connector, or the environment's built-in connectors | Whatever the course environment provides; isolated behind `tool_map.yaml` | **Open.** Needs the user to choose and authenticate a server. Fallback: `mcp.docs` / `mcp.gmail` are blank in `pulse.yaml`, `tool_map.yaml` lists the logical actions with no tools mapped, and `pulse doctor` reports both as not configured. This blocks Phase 5 only. |
+| 1 | Which Docs and Gmail MCP servers | A community Google Workspace MCP server (stdio), a hosted connector, or the environment's built-in connectors | Whatever the course environment provides; isolated behind `tool_map.yaml` | **Settled (2026-11-22, project owner): the project's own [gworkspace-mcp](https://github.com/tejasgs-dev/GmailGdocMCPServer), deployed on Render**, one server for Docs and Gmail over Streamable HTTP (`https://gworkspace-mcp.onrender.com/mcp`, `Authorization: Bearer <PULSE_MCP_API_KEY>`). It holds the Google OAuth token; in remote mode `send_email` is exposed only with `ENABLE_SEND_EMAIL=true`, and it accepts only its `ALLOWED_RECIPIENTS`. Its tools report results and errors as text, so `tool_map.yaml` gives a success and a not-found pattern per action. **Update (2026-11-22, project owner): send, not draft.** The pulse is appended to one hand-made Doc (`PULSE_DOC_ID`) and emailed with `send_email`. **Gap:** the server has no read-only way to check a doc's text, so the duplicate check (`doc_contains_text`, README "No double sending") must be added to it; until then `publish.json` is the guard. |
 | 2 | Play Store data path | Manual export files vs. a public-listing fetcher | Export files first; fetcher only after a Terms of Service check | **Settled (revised 2026-11-21): public listing via `google-play-scraper`, approved by the project owner for this course project.** Reason: the brief names the Play Store listing and `com.nextbillion.groww` as the primary target, and only Groww's developers can download a Play Console export, so an export-only rule would leave Android reviews (most of Groww's users) out of scope. Conditions: public listing only, no login or cookies, rate-limited, fetching only what the review window needs (incremental weekly runs, `max_reviews` cap), and no reviewer identity fields read. **Risk accepted:** Google Play's Terms of Service restrict automated access to Play. This is acceptable for a course project but should be re-reviewed before any production or commercial use. Fallback: set `ingest.play_public.enabled: false` to read export files from `data/imports/play/` (mapping in `ingest.play_columns`, Play Console format by default). The problem statement's review-source rule (§6) was amended to match. |
 | 3 | Groww iOS App Store ID | Look up and verify | Must be confirmed before the first App Store ingest | **Settled.** `1404871703` ("Groww Stocks, Mutual Fund, IPO", bundle `com.nextbillion.groww`), confirmed through the iTunes Search API. The `in` RSS feed responds, but intermittently serves empty pages; see §4.1 for how the adapter handles that. |
 | 4 | Non-English reviews | Exclude from quotes vs. translate vs. drop | Count toward volume, exclude from quotes (no translated "verbatim" quotes) | **Settled (2026-11-21, tutor requirement): dropped at ingest.** Only English reviews are kept; Hindi, Hinglish (`hi-Latn`) and every other language are dropped and counted per source (§4.2). The Play Store fetch no longer requests `hl=hi`. |
@@ -599,6 +623,6 @@ AI Agent+MCP/
 | Verbatim quotes, no invented wording | §4.5 sentence-span extraction by code, §4.6 fidelity check |
 | 250 words or fewer, easy to scan | §4.6 word count, §7.1 layout |
 | No PII | §4.3, §4.6 PII scan, §11 |
-| Pulse in Google Docs via MCP | §4.7 Docs flow |
-| Gmail draft to self or alias via MCP | §4.7 Gmail flow, §7.2 |
+| Pulse in Google Docs via MCP | §4.7 publish flow (append to the shared Doc) |
+| Email to self or alias via MCP (sent, amended 2026-11-22) | §4.7 publish flow, §7.2 |
 | MCP-first, no hand-written Google OAuth or REST | §4.7, §11 |
