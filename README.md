@@ -43,64 +43,16 @@ Setup:
 ```bash
 pulse doctor                       # health check, API key, list_tools, tool-map coverage
 pulse publish --week 2026-W46      # from runs/2026-W46/ (pulse.md, pulse.json)
-pulse publish --week 2026-W46 --force   # send that week's email again
+pulse publish --week 2026-W46 --force   # deliberately re-publish (append + email again)
 pulse run --week 2026-W46          # the whole pipeline, then publish
 ```
 
 `runs/{week}/publish.json` records each step. If the email fails after the Doc entry was appended, running `pulse publish` again sends the email without appending a second entry. The free Render service sleeps when idle, so the first call can wait up to a minute for it to wake.
 
-#### No double sending
+#### No double publishing
 
-Before appending or sending, the publisher checks whether the week was already published:
+Each week's heading ends with that week's **marker**, for example `(2026-W46)` in `Week of 9 Nov 2026 (2026-W46)`. Before appending or sending, the publisher asks the server's read-only `doc_contains_text` tool whether the marker is already in the Doc (exact, case-sensitive). If it is, the run logs "already published", skips both the append and the email, and exits successfully. The Doc is the record, so this also works on GitHub Actions, where `runs/` is not kept.
 
-- **In the Doc**, when the server has the read-only `doc_contains_text` tool: if the week's heading (`Week of 9 Nov 2026 (2026-W46)`) is already in the Doc, both steps are skipped. This works on GitHub Actions, where `runs/` is not kept.
-- **In `runs/{week}/publish.json`**: a week whose email was sent is not sent again without `--force`. Until the server has `doc_contains_text`, this is the only guard, so it only works where `runs/` is kept (`pulse doctor` warns about this).
-
-`--force` sends the email again. The Doc entry is still appended only if it is not already there.
-
-To add `doc_contains_text` to gworkspace-mcp, add this to `src/gworkspace_mcp/docs.py`:
-
-```python
-def doc_contains_text(service, document_id: str, text: str) -> tuple[bool, str]:
-    """Return (found, doc_title): whether ``text`` occurs in the document body. Read-only."""
-    doc_id = extract_document_id(document_id)
-    needle = (text or "").strip()
-    if not needle:
-        raise ValueError("'text' must not be empty.")
-    if len(needle) > 500:
-        raise ValueError("'text' must be at most 500 characters.")
-    doc = service.documents().get(
-        documentId=doc_id,
-        fields="title,body(content(paragraph(elements(textRun(content)))))",
-    ).execute()
-    body = "".join(
-        el.get("textRun", {}).get("content", "")
-        for block in (doc.get("body") or {}).get("content") or []
-        for el in (block.get("paragraph") or {}).get("elements") or []
-    )
-    return needle in body, doc.get("title", "(untitled)")
-```
-
-Then add this to `src/gworkspace_mcp/server.py`, and add `doc_contains_text` to `TOOLS`:
-
-```python
-def doc_contains_text(document_id: str, text: str) -> str:
-    """Check whether an existing Google Doc's body contains the given text (read-only).
-
-    Args:
-        document_id: The Google Doc ID, or a full URL like
-            https://docs.google.com/document/d/<ID>/edit
-        text: The text to look for (exact, case-sensitive; max 500 characters).
-    """
-    try:
-        found, title = docs.doc_contains_text(get_docs_service(), document_id, text)
-        return f"Text {'found' if found else 'not found'} in '{title}'."
-    except Exception as exc:  # noqa: BLE001
-        return format_error(exc, context="docs")
-
-
-TOOLS = (send_email, create_draft, update_draft, append_to_doc, create_doc, replace_doc_body,
-         find_doc, doc_contains_text)
-```
-
-The tool only reads the Doc, and the server's existing Docs scope already covers it. `src/pulse/publish/tool_map.yaml` already maps it (`Text found in '…'.` / `Text not found in '…'.`). Once the server is redeployed, `pulse doctor` stops warning and publishing uses the check.
+- `pulse doctor` checks that the server offers `doc_contains_text`. Without it, nothing is published.
+- `--force` deliberately re-publishes: it appends the entry again and sends the email again.
+- If the email failed after the append, a local re-run sends only the email (from `runs/{week}/publish.json`). On Actions, where that file is not kept, the week counts as published; the failed run shows the error, and `--force` sends it again.

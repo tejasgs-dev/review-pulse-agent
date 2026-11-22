@@ -57,7 +57,7 @@ def test_run_without_dry_run_publishes_through_mcp(publish_config, tmp_path, mon
     result = runner.invoke(app, ["run", "--week", "2026-W47", "--skip-ingest",
                                  "--engine", "llm", "--config", str(path)])
     assert result.exit_code == ExitCode.OK, result.output
-    assert fake_mcp.tool_names() == ["append_to_doc", "send_email"]
+    assert fake_mcp.tool_names() == ["doc_contains_text", "append_to_doc", "send_email"]
     (doc,) = fake_mcp.docs.values()
     assert "Week of 16 Nov 2026 (2026-W47)" in doc["content"]
     assert "Top Themes" in doc["content"]

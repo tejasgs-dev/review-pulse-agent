@@ -473,13 +473,10 @@ def _publish_stage(cfg: PulseConfig, week: str, *, force: bool = False) -> None:
                         f"--week {week}` again to resume", fg=typer.colors.RED, err=True)
         raise typer.Exit(ExitCode.CONFIG_ERROR if e.setup and not e.record
                          else ExitCode.PUBLISH_FAILED) from e
-    if record.get("skip_reason"):        # nothing was called; publish.json is unchanged
-        typer.secho(f"Skipped {week}: {record['skip_reason']}", fg=typer.colors.YELLOW)
-        return
     update_manifest(cfg.paths.runs_path, week, "publish", _publish_summary(record))
-    if record["status"] == "skipped":
-        typer.secho(f"Skipped {week}: already in the Doc {record['doc_url']}",
-                    fg=typer.colors.YELLOW)
+    if record["status"] == "skipped":       # not an error: the week is already out
+        typer.secho(f"Skipped {week}: {record.get('skip_reason', 'already published')} "
+                    f"{record['doc_url']}", fg=typer.colors.YELLOW)
         return
     typer.secho(f"Published {week}: {record['doc_url']}", fg=typer.colors.GREEN)
 
@@ -546,11 +543,9 @@ def _mcp_live_checks(cfg: PulseConfig, warnings: list[str], *,
             out.append((f"every mapped {srv} tool exists with matching arguments",
                         not problems, "; ".join(problems)))
         names = {t.name for t in listed}
-        check = tool_map.spec("docs", "doc_contains_text")
-        if check is not None and check.tool not in names:
-            warnings.append(f"the server has no {check.tool!r} tool yet: duplicate sends are "
-                            "prevented only by runs/{week}/publish.json, which GitHub Actions "
-                            "does not keep (see README, 'No double sending')")
+        check = tool_map.spec("docs", "doc_contains_text").tool
+        out.append((f"duplicate check tool {check!r} is available", check in names,
+                    "the server must offer it: without it nothing is published"))
         unmapped = sorted(n for n in names if "send" in n.lower()
                           and n != tool_map.spec("gmail", "send_email").tool)
         if unmapped:

@@ -5,8 +5,9 @@ reporting errors as plain text instead of `isError`. State lives in memory, ever
 recorded, and `fail` / `delay` inject errors and slow calls. `create_doc` and the draft tools
 exist (as on the real server) so tests can prove they are never called.
 
-`with_contains=True` adds `doc_contains_text`, the read-only tool the pulse asks the server to
-add (README, "No double sending"); without it the server matches today's gworkspace-mcp.
+`doc_contains_text` matches like the real one: exact and case-sensitive (no stripping), and
+it replies only "found: true" / "found: false". Set `with_contains=False` to model a server
+without it.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ class FakeWorkspace:
     fail: dict[str, str] = field(default_factory=dict)       # tool -> text returned instead
     delay: dict[str, float] = field(default_factory=dict)    # tool -> seconds to sleep
     sent: list[dict] = field(default_factory=list)            # to, subject, body
-    with_contains: bool = False
+    with_contains: bool = True
     _n: int = 0
 
     def _id(self, prefix: str) -> str:
@@ -95,15 +96,16 @@ class FakeWorkspace:
         if ws.with_contains:
             @s.tool()
             async def doc_contains_text(document_id: str, text: str) -> str:
-                """Check whether a Google Doc's body contains the given text (read-only)."""
+                """Check whether text appears in a Google Doc's body (all tabs). Read-only."""
                 args = {"document_id": document_id, "text": text}
                 if (err := await enter("doc_contains_text", args)) is not None:
                     return err
+                if not text or not text.strip():
+                    return "Invalid input: 'text' must not be empty."
                 if document_id not in ws.docs:
                     return "Document not found — check the document ID."
-                doc = ws.docs[document_id]
-                found = text.strip() in doc["content"]
-                return f"Text {'found' if found else 'not found'} in '{doc['title']}'."
+                found = text in ws.docs[document_id]["content"]
+                return f"found: {'true' if found else 'false'}"
 
         @s.tool()
         async def create_doc(title: str, content: str) -> str:

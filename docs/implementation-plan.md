@@ -365,33 +365,33 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 
 **Change of goal (2026-11-22, project owner):** the pulse is sent, not drafted. One Google Doc, created by hand, holds every week (`PULSE_DOC_ID`); the app never calls `create_doc`. `send_email` replaces the old "refuse any send tool" rule, for this step only and only to `PULSE_RECIPIENT`.
 
-**Server (§13 #1, settled 2026-11-22):** [gworkspace-mcp](https://github.com/tejasgs-dev/GmailGdocMCPServer) on Render, one server for both Docs and Gmail, over Streamable HTTP with a bearer key (`PULSE_MCP_API_KEY` in `.env`). Used tools: `append_to_doc`, `send_email` (needs `ENABLE_SEND_EMAIL=true`), and `doc_contains_text` once it is added (README, "No double sending").
+**Server (§13 #1, settled 2026-11-22):** [gworkspace-mcp](https://github.com/tejasgs-dev/GmailGdocMCPServer) on Render, one server for both Docs and Gmail, over Streamable HTTP with a bearer key (`PULSE_MCP_API_KEY` in `.env`). Used tools: `doc_contains_text` (read-only, exact and case-sensitive, replies `found: true/false`), `append_to_doc`, `send_email` (needs `ENABLE_SEND_EMAIL=true`).
 
 ### Tasks
 - [x] `publish/mcp_client.py`: built on the official `mcp` SDK (v2 `Client`).
   - [x] Connect over stdio or Streamable HTTP from the `mcp.docs` / `mcp.gmail` config (header values are secrets, expanded from `.env`); `list_tools()`; `call_tool()`; clean shutdown. One connection when Docs and Gmail are the same server.
   - [x] Poll `health_url` until 200 before connecting (the free Render service sleeps; `wake_timeout_seconds` 120), then connect and call with timeouts (MCP-06/07). Clear errors: a 401 names `PULSE_MCP_API_KEY`; errors wrapped in task-group exception groups are unwrapped.
-- [x] `publish/tool_map.yaml`: `docs.append_to_doc`, `docs.doc_contains_text` (optional), `gmail.send_email`, with argument templates and result patterns (`ok`, `not_found`), because this server returns text, not structured results.
-- [x] Startup check: every mapped tool exists in `list_tools()` with every argument in its input schema and every required field given (MCP-01/02); `doc_contains_text` is skipped while the server lacks it. **A tool whose name contains `send` may only be `gmail.send_email`, whose arguments must be exactly `to`/`subject`/`body`** (MCP-03); any argument that could send is refused (MCP-04); `create_doc` can never be mapped (MCP-10); `isError` or unexpected text is a failure (MCP-08).
+- [x] `publish/tool_map.yaml`: `docs.append_to_doc`, `docs.doc_contains_text` (required), `gmail.send_email`, with argument templates and result patterns (`ok`, `not_found`), because this server returns text, not structured results.
+- [x] Startup check: every mapped tool exists in `list_tools()` with every argument in its input schema and every required field given (MCP-01/02); **A tool whose name contains `send` may only be `gmail.send_email`, whose arguments must be exactly `to`/`subject`/`body`** (MCP-03); any argument that could send is refused (MCP-04); `create_doc` can never be mapped (MCP-10); `isError` or unexpected text is a failure (MCP-08).
 - [x] `config`: `publish.doc_id` from `PULSE_DOC_ID` (an ID or a Doc URL, validated); `docs_folder_id` and `doc_title` removed. Publishing stops before any call when it is missing.
-- [x] `render/markdown.render_doc_entry`: plain text (Markdown symbols stripped), a separator line, the heading `Week of 9 Nov 2026 (2026-W46)`, then the pulse without its header line.
+- [x] `render/markdown.render_doc_entry`: plain text (Markdown symbols stripped), a separator line, the heading `Week of 9 Nov 2026 (2026-W46)` (always ending with the exact marker `(2026-W46)`), then the pulse without its header line.
 - [x] `publish/docs_publisher.py`: `week_in_doc` (the duplicate check, `doc_contains_text`) and `append_entry` (`append_to_doc`; a missing Doc fails clearly).
 - [x] `publish/email_sender.py`: one email to `PULSE_RECIPIENT` with the §7.2 subject and the pulse text plus `Full pulse: {doc_url}`; any other `to` is refused before the call.
-- [x] `publish/runner.py`: check → append → send. The week's heading in the Doc skips both steps; a sent email in `publish.json` skips the week unless `--force`; after a failed send, a re-run sends without appending again; `--force` re-sends but never appends a second entry.
+- [x] `publish/runner.py`: check → append → send. The week's marker found in the Doc → "already published", both steps skipped, exit 0; after a failed send, a local re-run sends without appending again; `--force` re-publishes (append and send).
 - [x] `runs/{week}/publish.json`, rewritten after every step (status `sent` / `skipped` / `partial` / `failed`, the duplicate check used, append and email status, message ID, hashes, per-call timings; no payloads, no key). The manifest's `publish` section holds statuses and IDs only.
 - [x] `pulse publish --week … [--force]` from saved artifacts (`pulse.md`, `pulse.json`), refusing weeks that failed validation; `pulse run` without `--dry-run` publishes after the analysis. Exit code 11 on a failed step, 2 on missing setup.
-- [x] `pulse doctor`: `PULSE_DOC_ID`, health check, credentials, `list_tools`, tool-map coverage, a warning while the server has no `doc_contains_text`, and a warning for unmapped `send` tools; `--offline` skips the network.
-- [x] Tests (`tests/test_publish.py`, against `tests/fake_mcp.py`, an in-process fake with gworkspace-mcp's exact tools and reply text, with or without `doc_contains_text`; an autouse guard stops any offline test from reaching a real server):
+- [x] `pulse doctor`: `PULSE_DOC_ID`, health check, credentials, `list_tools`, tool-map coverage, a check that the server offers `doc_contains_text`, and a warning for unmapped `send` tools; `--offline` skips the network.
+- [x] Tests (`tests/test_publish.py`, against `tests/fake_mcp.py`, an in-process fake with gworkspace-mcp's exact tools and reply text; an autouse guard stops any offline test from reaching a real server):
   - [x] the Doc entry layout and Markdown stripping; the call order `append_to_doc → send_email`, one recipient, no cc/bcc, `create_doc` never called;
-  - [x] no double sending: a sent week makes no calls without `--force`; with `--force` only the email is sent again; a heading already in the Doc skips both steps;
+  - [x] not yet published → appended and emailed; already published (marker in the Doc, no `publish.json`) → both skipped; `--force` → published again; only the exact marker counts (`(2026-w46)`, `( 2026-W46 )`, another week do not); doctor fails without the tool;
   - [x] resume after a failed send does not append again; nothing is sent when the append failed; a missing Doc fails clearly and is never created;
   - [x] bad tool maps are refused (send tools elsewhere, cc/bcc, `create_doc`, `send_now`); a slow tool times out; unvalidated weeks and a missing Doc ID, recipient or key make no calls; the key never reaches `publish.json`.
-- [ ] Add `doc_contains_text` to gworkspace-mcp (README, "No double sending") and redeploy, so GitHub Actions cannot send a week twice.
+- [x] `doc_contains_text` added to gworkspace-mcp and deployed (2026-11-22), so GitHub Actions cannot publish a week twice.
 
 ### Deliverables
 - **M2:** one command that turns real reviews into an entry in the shared Google Doc and an email in the recipient's inbox.
 
-*Status (2026-11-22): built and tested offline against a fake of the chosen server. The first live run is `pulse doctor` then `pulse publish --week 2026-W46`.*
+*Status (2026-11-22): live. 2026-W46 was appended to the shared Doc and emailed; a second run is skipped as already published.*
 
 ### Exit criteria
 - A live run appends the week's entry to the shared Doc and sends one email to the configured recipient that contains the note and the Doc link.
@@ -402,8 +402,7 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 ### Risks
 | Risk | Mitigation |
 |---|---|
-| The server cannot check a doc's text, so Actions (no `runs/`) could send a week twice | Add the read-only `doc_contains_text` tool to the server; until then, run publishing where `runs/` is kept, and `pulse doctor` warns |
-| The send fails after the append, on Actions with the Doc check | The run fails visibly; `pulse publish --week … --force` sends the email without appending again |
+| The send fails after the append, on Actions with the Doc check | The run fails visibly; `pulse publish --week … --force` re-publishes |
 | MCP OAuth tokens expire during unattended runs | `pulse doctor` runs before each scheduled run; document how to re-authenticate |
 
 ---

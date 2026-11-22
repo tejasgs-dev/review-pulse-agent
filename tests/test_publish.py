@@ -13,11 +13,18 @@ from pulse.config import PROJECT_ROOT, load_config
 from pulse.publish import mcp_client as mc
 from pulse.publish.mcp_client import wait_until_healthy as real_wait_until_healthy
 from pulse.publish.runner import PublishError, publish_week, read_record
-from pulse.render.markdown import DOC_SEPARATOR, plain_text, render_doc_entry, week_heading
+from pulse.render.markdown import (
+    DOC_SEPARATOR,
+    plain_text,
+    render_doc_entry,
+    week_heading,
+    week_marker,
+)
 from tests.conftest import TEST_DOC_ID
 
 WEEK = "2026-W46"
 HEADING = "Week of 9 Nov 2026 (2026-W46)"
+MARKER = "(2026-W46)"
 DOC_URL = f"https://docs.google.com/document/d/{TEST_DOC_ID}/edit"
 KEY = "test-key-0123456789-0123456789-xyz"
 PULSE = ("Groww Weekly Review Pulse — Week of 9 Nov 2026\nSource: 3 reviews\n\nTop Themes\n"
@@ -60,6 +67,16 @@ def test_doc_entry_is_plain_text_with_a_separator_and_week_heading():
     assert entry.endswith("Slow replies.\n")
 
 
+@pytest.mark.parametrize("week", ["2026-W01", "2026-W46", "2026-W53", "2027-W09"])
+def test_the_heading_always_holds_the_exact_marker(week):
+    marker = week_marker(week)
+    assert marker == f"({week})"
+    assert week_heading(week).endswith(" " + marker)
+    assert render_doc_entry(week, PULSE).splitlines()[1].endswith(" " + marker)
+    # Markdown stripping must never touch it, even on a pulse that is all markup.
+    assert marker in render_doc_entry(week, f"## **{week}** `x`\n# Top Themes\n")
+
+
 def test_markdown_symbols_are_removed():
     md = "## Top Themes\n**Support** is `slow`\n- a point\n> quoted\n• kept\n1. kept"
     assert plain_text(md) == "Top Themes\nSupport is slow\n• a point\nquoted\n• kept\n1. kept"
@@ -95,21 +112,23 @@ def test_bad_tool_maps_are_refused(tmp_path, mutate, message):  # MCP-03, MCP-04
         mc.load_tool_map(path)
 
 
-@pytest.mark.parametrize("with_contains", [False, True])
-def test_tool_map_is_checked_against_the_servers_tools(with_contains):  # MCP-01, MCP-02
+def test_tool_map_is_checked_against_the_servers_tools():  # MCP-01, MCP-02
     import anyio
     from mcp import Client
 
     from tests.fake_mcp import FakeWorkspace
 
-    async def tools():
-        async with Client(FakeWorkspace(with_contains=with_contains).server()) as c:
+    async def tools(**kw):
+        async with Client(FakeWorkspace(**kw).server()) as c:
             return (await c.list_tools()).tools
 
     listed = anyio.run(tools)
     tm = mc.load_tool_map(TOOL_MAP)
-    assert mc.check_tools(tm, "docs", listed) == []   # doc_contains_text may be missing
+    assert mc.check_tools(tm, "docs", listed) == []
     assert mc.check_tools(tm, "gmail", listed) == []
+    without = anyio.run(lambda: tools(with_contains=False))   # the check is required
+    assert mc.check_tools(tm, "docs", without) == [
+        "docs.doc_contains_text: the server has no tool 'doc_contains_text'"]
     renamed = [t for t in listed if t.name != "append_to_doc"]
     assert "no tool 'append_to_doc'" in mc.check_tools(tm, "docs", renamed)[0]
     bad = tm.model_copy(update={"docs": {**tm.docs, "append_to_doc": tm.docs["append_to_doc"]
@@ -130,10 +149,11 @@ def test_results_are_read_from_the_text_and_errors_are_failures():  # MCP-08
     with pytest.raises(mc.McpCallError, match="Permission denied"):
         mc.interpret(append, result("Permission denied — check that the API is enabled"))
     check = tm.spec("docs", "doc_contains_text")
-    assert mc.interpret(check, result("Text found in 'Pulse'.")).status == "ok"
-    assert mc.interpret(check, result("Text not found in 'Pulse'.")).status == "not_found"
-    with pytest.raises(mc.McpCallError):               # an unreadable doc is not "absent"
-        mc.interpret(check, result("Document not found — check the document ID."))
+    assert mc.interpret(check, result("found: true")).status == "ok"
+    assert mc.interpret(check, result("found: false")).status == "not_found"
+    for text in ("Document not found — check the document ID.", "found: maybe", ""):
+        with pytest.raises(mc.McpCallError):            # never read as "not published"
+            mc.interpret(check, result(text))
     send = tm.spec("gmail", "send_email")
     assert mc.interpret(send, result("Email sent to me@example.com (message id: 18c)")
                         ).groups["message_id"] == "18c"
@@ -146,12 +166,14 @@ def test_results_are_read_from_the_text_and_errors_are_failures():  # MCP-08
 # ------------------------------------------------------------------ publishing
 
 
-def test_publish_appends_to_the_doc_then_sends_one_email(pcfg, fake_mcp):
+def test_not_yet_published_week_is_appended_then_emailed(pcfg, fake_mcp):
     write_week(pcfg)
     record = publish_week(pcfg, WEEK)
-    assert fake_mcp.tool_names() == ["append_to_doc", "send_email"]
+    assert fake_mcp.tool_names() == ["doc_contains_text", "append_to_doc", "send_email"]
+    assert fake_mcp.calls[0][1] == {"document_id": TEST_DOC_ID, "text": MARKER}
     assert doc_text(fake_mcp) == ("Groww Weekly Review Pulse\n\n"
                                   + render_doc_entry(WEEK, PULSE))
+    assert MARKER in doc_text(fake_mcp)
     (mail,) = fake_mcp.sent
     assert mail["to"] == "me@example.com"
     assert mail["subject"] == "Groww Review Pulse — Week of 9 Nov 2026"
@@ -159,50 +181,54 @@ def test_publish_appends_to_the_doc_then_sends_one_email(pcfg, fake_mcp):
     (_, args), = [c for c in fake_mcp.calls if c[0] == "send_email"]
     assert args["cc"] is None and args["bcc"] is None
     assert "create_doc" not in fake_mcp.tool_names()
-    assert record["status"] == "sent" and record["duplicate_check"] == "publish.json"
+    assert record["status"] == "sent" and record["duplicate_check"] == "doc_contains_text"
     assert record["doc"]["status"] == "ok" and record["email"]["status"] == "sent"
-    assert record["doc_url"] == DOC_URL and record["heading"] == HEADING
+    assert record["doc_url"] == DOC_URL and record["marker"] == MARKER
     assert read_record(pcfg.paths.runs_path, WEEK)["status"] == "sent"
     assert fake_mcp.connections == 1          # one server serves Docs and Gmail
 
 
-def test_a_sent_week_is_not_sent_again_without_force(pcfg, fake_mcp):
+def test_already_published_week_skips_append_and_email(pcfg, fake_mcp, tmp_path):
+    # As on GitHub Actions: no publish.json, only the marker in the Doc.
+    fake_mcp.docs[TEST_DOC_ID]["content"] += "\n" + render_doc_entry(WEEK, "older text\n")
+    before = doc_text(fake_mcp)
+    write_week(pcfg)
+    echoed = []
+    record = publish_week(pcfg, WEEK, echo=echoed.append)
+    assert fake_mcp.tool_names() == ["doc_contains_text"]
+    assert fake_mcp.sent == [] and doc_text(fake_mcp) == before
+    assert record["status"] == "skipped" and "already published" in record["skip_reason"]
+    assert record["email"]["status"] == "skipped"
+    assert any("already published" in line for line in echoed)
+
+
+def test_a_second_run_skips_and_keeps_the_first_record(pcfg, fake_mcp):
+    write_week(pcfg)
+    first = publish_week(pcfg, WEEK)
+    fake_mcp.calls.clear()
+    again = publish_week(pcfg, WEEK)
+    assert fake_mcp.tool_names() == ["doc_contains_text"] and len(fake_mcp.sent) == 1
+    assert again["status"] == "skipped"
+    saved = read_record(pcfg.paths.runs_path, WEEK)
+    assert saved["email"]["message_id"] == first["email"]["message_id"]   # not lost
+
+
+def test_force_republishes_an_already_published_week(pcfg, fake_mcp):
     write_week(pcfg)
     publish_week(pcfg, WEEK)
     fake_mcp.calls.clear()
-    again = publish_week(pcfg, WEEK)
-    assert fake_mcp.calls == [] and fake_mcp.connections == 1   # not even connected
-    assert again["status"] == "skipped" and "--force" in again["skip_reason"]
-    assert read_record(pcfg.paths.runs_path, WEEK)["status"] == "sent"   # record kept
     forced = publish_week(pcfg, WEEK, force=True)
-    assert fake_mcp.tool_names() == ["send_email"]    # the Doc entry is not appended twice
-    assert len(fake_mcp.sent) == 2 and doc_text(fake_mcp).count(HEADING) == 1
+    assert fake_mcp.tool_names() == ["doc_contains_text", "append_to_doc", "send_email"]
+    assert len(fake_mcp.sent) == 2 and doc_text(fake_mcp).count(MARKER) == 2
     assert forced["status"] == "sent" and forced["forced"] is True
     assert forced["previous_email"]["status"] == "sent"
 
 
-def test_week_heading_in_the_doc_skips_both_steps(pcfg, fake_mcp):  # no runs/ (Actions)
-    fake_mcp.with_contains = True
-    fake_mcp.docs[TEST_DOC_ID]["content"] += render_doc_entry(WEEK, PULSE)
+@pytest.mark.parametrize("other", ["(2026-W45)", "(2026-w46)", "( 2026-W46 )", "2026-W46"])
+def test_only_the_exact_marker_counts(pcfg, fake_mcp, other):
+    fake_mcp.docs[TEST_DOC_ID]["content"] += f"\nWeek of 2 Nov 2026 {other}\n"
     write_week(pcfg)
-    record = publish_week(pcfg, WEEK)
-    assert fake_mcp.tool_names() == ["doc_contains_text"]
-    assert fake_mcp.calls[0][1] == {"document_id": TEST_DOC_ID, "text": HEADING}
-    assert fake_mcp.sent == [] and record["status"] == "skipped"
-    assert record["duplicate_check"] == "doc_contains_text"
-    assert record["email"]["status"] == "skipped"
-    fake_mcp.calls.clear()
-    publish_week(pcfg, WEEK, force=True)             # --force re-sends, still no second entry
-    assert fake_mcp.tool_names() == ["doc_contains_text", "send_email"]
-    assert doc_text(fake_mcp).count(HEADING) == 1
-
-
-def test_with_the_check_tool_a_new_week_is_appended_and_sent(pcfg, fake_mcp):
-    fake_mcp.with_contains = True
-    write_week(pcfg)
-    record = publish_week(pcfg, WEEK)
-    assert fake_mcp.tool_names() == ["doc_contains_text", "append_to_doc", "send_email"]
-    assert record["status"] == "sent" and record["duplicate_check"] == "doc_contains_text"
+    assert publish_week(pcfg, WEEK)["status"] == "sent"    # a different/near marker: publish
 
 
 def test_resume_after_the_email_failed_does_not_append_again(pcfg, fake_mcp):
@@ -215,9 +241,9 @@ def test_resume_after_the_email_failed_does_not_append_again(pcfg, fake_mcp):
     assert saved["doc"]["status"] == "ok" and saved["email"]["status"] == "failed"
     del fake_mcp.fail["send_email"]
     fake_mcp.calls.clear()
-    record = publish_week(pcfg, WEEK)                 # no --force needed: nothing was sent
-    assert fake_mcp.tool_names() == ["send_email"]
-    assert record["status"] == "sent" and doc_text(fake_mcp).count(HEADING) == 1
+    record = publish_week(pcfg, WEEK)     # the marker is in the Doc, but nothing was sent
+    assert fake_mcp.tool_names() == ["doc_contains_text", "send_email"]
+    assert record["status"] == "sent" and doc_text(fake_mcp).count(MARKER) == 1
 
 
 def test_email_never_sent_when_the_append_failed(pcfg, fake_mcp):
@@ -233,18 +259,25 @@ def test_email_never_sent_when_the_append_failed(pcfg, fake_mcp):
 def test_a_missing_doc_fails_clearly_and_never_creates_one(pcfg, fake_mcp):
     del fake_mcp.docs[TEST_DOC_ID]
     write_week(pcfg)
-    with pytest.raises(PublishError, match="PULSE_DOC_ID.*was not found|was not found"):
+    with pytest.raises(PublishError, match="Document not found"):
         publish_week(pcfg, WEEK)
-    assert fake_mcp.tool_names() == ["append_to_doc"] and fake_mcp.docs == {}
+    assert fake_mcp.tool_names() == ["doc_contains_text"] and fake_mcp.docs == {}
 
 
 def test_a_failed_check_stops_before_appending(pcfg, fake_mcp):
-    fake_mcp.with_contains = True
     fake_mcp.fail["doc_contains_text"] = "Google API error 500: backend"
     write_week(pcfg)
     with pytest.raises(PublishError, match="500"):
         publish_week(pcfg, WEEK)
-    assert fake_mcp.tool_names() == ["doc_contains_text"]
+    assert fake_mcp.tool_names() == ["doc_contains_text"] and fake_mcp.sent == []
+
+
+def test_a_server_without_the_check_tool_publishes_nothing(pcfg, fake_mcp):
+    fake_mcp.with_contains = False
+    write_week(pcfg)
+    with pytest.raises(PublishError, match="doc_contains_text"):
+        publish_week(pcfg, WEEK)
+    assert fake_mcp.calls == []
 
 
 def test_a_slow_tool_times_out_instead_of_hanging(publish_config, fake_mcp):  # MCP-07
@@ -352,19 +385,29 @@ def test_cli_publish_force_and_doctor_with_the_fake_server(publish_config, fake_
     result = runner.invoke(app, ["publish", "--week", WEEK, "--config", str(path)])
     assert result.exit_code == ExitCode.OK, result.output
     assert f"Doc entry '{HEADING}' appended: {DOC_URL}" in result.output
+    assert f"Published {WEEK}" in result.output
     assert "Email sent to me@example.com (message id: msg" in result.output
     manifest = json.loads((cfg.paths.runs_path / WEEK / "manifest.json").read_text("utf-8"))
     assert manifest["publish"]["status"] == "sent"
     assert "me@example.com" not in json.dumps(manifest["publish"])
     again = runner.invoke(app, ["publish", "--week", WEEK, "--config", str(path)])
-    assert again.exit_code == ExitCode.OK and "use --force" in again.output
+    assert again.exit_code == ExitCode.OK, again.output
+    assert "already published" in again.output and "use --force" in again.output
     assert len(fake_mcp.sent) == 1
     forced = runner.invoke(app, ["publish", "--week", WEEK, "--force", "--config", str(path)])
     assert forced.exit_code == ExitCode.OK and len(fake_mcp.sent) == 2
     doctor = runner.invoke(app, ["doctor", "--config", str(path)])
-    assert "answers list_tools (7 tools)" in doctor.output, doctor.output
+    assert doctor.exit_code == ExitCode.OK, doctor.output
+    assert "answers list_tools (8 tools)" in doctor.output
     assert "every mapped docs tool exists" in doctor.output
-    assert "no 'doc_contains_text' tool yet" in doctor.output
+    assert "[ok  ] duplicate check tool 'doc_contains_text' is available" in doctor.output
+
+
+def test_doctor_fails_when_the_server_lacks_the_check_tool(publish_config, fake_mcp):
+    fake_mcp.with_contains = False
+    doctor = runner.invoke(app, ["doctor", "--config", str(publish_config())])
+    assert doctor.exit_code == ExitCode.DOCTOR_FAILED
+    assert "[FAIL] duplicate check tool 'doc_contains_text' is available" in doctor.output
 
 
 def test_cli_publish_failure_exit_code(publish_config, fake_mcp):

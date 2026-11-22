@@ -6,15 +6,19 @@ and body), so `pulse publish` never re-runs the analysis. Refuses to publish a w
 validation failed (VAL-07), and stops before any call when PULSE_DOC_ID or PULSE_RECIPIENT is
 missing.
 
-No double sending. Before appending or sending:
-1. If the server has the read-only `doc_contains_text` tool, the Doc is checked for the
-   week's heading ("Week of 9 Nov 2026 (2026-W46)"). Found → both steps are skipped. This
-   works on GitHub Actions, where runs/ is not kept.
-2. `runs/{week}/publish.json` (rewritten after every step) is checked too. A week whose email
-   was sent is not sent again without `--force`. A week whose Doc entry was appended but whose
-   email failed resumes from the email (the entry is not appended twice).
-With `--force` the email is sent again; the Doc entry is still appended only when it is not
-already there.
+No double publishing. Before appending or sending, the Doc is checked for the week's unique
+marker, "(2026-W46)", with the server's read-only `doc_contains_text` tool (an exact,
+case-sensitive match; every appended heading contains the marker exactly). Found → "already
+published": neither step runs and the command succeeds. The Doc is the record, so this works
+on GitHub Actions, where runs/ is not kept.
+
+`runs/{week}/publish.json` (rewritten after every step) adds resuming: if this machine
+appended the entry but the email failed, the next run sends the email without appending again
+(the marker is in the Doc, but nothing was sent). On Actions, where publish.json is not kept,
+such a week counts as published; `--force` sends it.
+
+`--force` deliberately re-publishes: the entry is appended again and the email is sent again,
+whatever the Doc or publish.json says.
 """
 
 from __future__ import annotations
@@ -40,7 +44,7 @@ from pulse.publish.mcp_client import (
     load_tool_map,
     verified_caller,
 )
-from pulse.render.markdown import render_doc_entry, week_heading
+from pulse.render.markdown import render_doc_entry, week_heading, week_marker
 
 Echo = Callable[[str], None]
 
@@ -119,23 +123,22 @@ def publish_week(cfg: PulseConfig, week: str, *, force: bool = False,
         raise PublishError(str(e), setup=True) from e
 
     prior = read_record(runs, week)
-    heading = week_heading(week)
-    if (prior.get("email") or {}).get("status") == "sent" and not force:
-        echo(f"  {week} was already emailed at {prior['email'].get('at')} "
-             f"(publish.json); use --force to send it again")
-        return {**prior, "status": "skipped",
-                "skip_reason": "already sent (publish.json); use --force to re-send"}
-
     doc_text = render_doc_entry(week, art["doc"])
-    prior_doc = prior.get("doc") or {}
+    marker = week_marker(week)
+    if marker not in doc_text:      # render_doc_entry guarantees it; never append without it
+        raise PublishError(f"the Doc entry for {week} lacks its marker {marker!r}", setup=True)
+    prior_doc, prior_email = prior.get("doc") or {}, prior.get("email") or {}
     record: dict[str, Any] = {
-        "week": week, "heading": heading, "doc_id": cfg.publish.doc_id,
-        "doc_url": cfg.publish.doc_url, "started_at": _now(), "status": "running",
-        "forced": force, "duplicate_check": None,
+        "week": week, "heading": week_heading(week), "marker": marker,
+        "doc_id": cfg.publish.doc_id, "doc_url": cfg.publish.doc_url, "started_at": _now(),
+        "status": "running", "forced": force, "duplicate_check": None,
         "servers": {"docs": describe(cfg.mcp.docs), "gmail": describe(cfg.mcp.gmail)},
-        "doc": prior_doc if prior_doc.get("status") == "ok" else {},
-        "email": {}, "calls": [],
+        "doc": {}, "email": {}, "calls": [],
     }
+    # What this machine did last time: the entry appended here, and whether it was emailed.
+    record["_appended_here"] = prior_doc.get("status") == "ok"
+    record["_sent_here"] = prior_email.get("status") == "sent"
+    record["_prior"] = {"doc": prior_doc, "email": prior_email}
     if prior.get("email"):
         record["previous_email"] = {k: prior["email"].get(k)
                                     for k in ("status", "message_id", "at")}
@@ -145,7 +148,7 @@ def publish_week(cfg: PulseConfig, week: str, *, force: bool = False,
         if status:
             record["status"] = status
             record["finished_at"] = _now()
-        write_json(path, record)
+        write_json(path, {k: v for k, v in record.items() if not k.startswith("_")})
 
     save()
     try:
@@ -184,27 +187,34 @@ async def _publish(cfg: PulseConfig, tool_map, art, doc_text, record, save,
             await _email_step(gmail_client, cfg, tool_map, art, record, save, echo)
 
 
+def _skip(record, save, echo: Echo, reason: str) -> bool:
+    echo(f"  {record['week']} already published ({reason}): not appended or emailed again "
+         "(use --force to re-publish)")
+    prior = record["_prior"]          # keep what earlier runs recorded (e.g. the message ID)
+    record["doc"] = prior["doc"] or {"status": "present", "at": _now()}
+    record["email"] = (prior["email"] if prior["email"].get("status") == "sent"
+                       else {"status": "skipped", "reason": f"already published ({reason})"})
+    record["status"] = "skipped"
+    record["skip_reason"] = f"already published ({reason})"
+    save()
+    return False
+
+
 async def _doc_step(docs, cfg: PulseConfig, doc_text, record, save, echo: Echo) -> bool:
-    """Append the week's entry unless it is already there. False: stop, nothing to send."""
-    doc_id, heading = cfg.publish.doc_id, record["heading"]
+    """Append the week's entry unless it is already published. False: stop, send nothing."""
+    doc_id, marker = cfg.publish.doc_id, record["marker"]
+    resume = record["_appended_here"] and not record["_sent_here"]
     try:
-        present = await week_in_doc(docs, doc_id=doc_id, heading=heading)
-        record["duplicate_check"] = "publish.json" if present is None else "doc_contains_text"
-        if present and not record["forced"]:
-            echo(f"  '{heading}' is already in the Doc: not appended or emailed again "
-                 "(use --force to re-send the email)")
-            record["doc"] = {"status": "present", "at": _now()}
-            record["email"] = {"status": "skipped", "reason": "week heading already in the doc"}
-            record["status"] = "skipped"
-            save()
-            return False
-        if present or (present is None and record["doc"].get("status") == "ok"):
-            where = "in the Doc" if present else "recorded in publish.json"
-            echo(f"  Doc entry already {where}: not appended again")
-            record["doc"] = {**record["doc"], "status": record["doc"].get("status") or "present",
-                             "skipped_at": _now()}
-            save()
-            return True
+        present = await week_in_doc(docs, doc_id=doc_id, marker=marker)
+        record["duplicate_check"] = "doc_contains_text"
+        if not record["forced"]:
+            if present and not resume:
+                return _skip(record, save, echo, f"{marker} is in the Doc")
+            if present and resume:
+                echo("  Doc entry already appended by the last run: only the email is sent")
+                record["doc"] = {"status": "present", "resumed": True, "at": _now()}
+                save()
+                return True
         r = await append_entry(docs, doc_id=doc_id, content=doc_text)
     except (McpSetupError, McpCallError) as e:
         record["doc"] = {"status": "failed", "error": str(e), "at": _now()}
@@ -213,7 +223,7 @@ async def _doc_step(docs, cfg: PulseConfig, doc_text, record, save, echo: Echo) 
     record["doc"] = {"status": "ok", "action": "appended", "doc_title": r.title,
                      "chars": r.chars, "content_sha256": _sha(doc_text), "at": _now()}
     save()
-    echo(f"  Doc entry '{heading}' appended: {cfg.publish.doc_url}")
+    echo(f"  Doc entry '{record['heading']}' appended: {cfg.publish.doc_url}")
     return True
 
 

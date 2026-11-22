@@ -233,12 +233,10 @@ publish/
 **One shared Doc.** The project owner creates one Google Doc by hand and puts its ID in `PULSE_DOC_ID` (`publish.doc_id`; a Doc URL is accepted too). Every week is appended to it. **The app never creates a doc:** `create_doc` cannot be mapped, and publishing stops before any call if `PULSE_DOC_ID` is missing.
 
 **Publish flow (one week):**
-1. **Duplicate check.** The week's heading is `Week of {Monday} ({ISO week})`, for example `Week of 9 Nov 2026 (2026-W46)`.
-   - If the server has the read-only `doc_contains_text` tool, call `doc_contains_text(doc_id, heading)`. Found → skip both steps (status `skipped`). This works without `runs/`, so it is the guard on GitHub Actions.
-   - Until the server has that tool, `runs/{week}/publish.json` is the guard: a week whose email was sent is not sent again without `--force`.
-2. **Append** with `append_to_doc(doc_id, entry)`. The entry is plain text (no Markdown symbols): a separator line (`────…`), the heading, then the pulse without its own header line (`render/markdown.render_doc_entry`). Skipped when the entry is already there (found in the Doc, or recorded in `publish.json`).
+1. **Already published?** Each week has a unique marker, `({ISO week})`, for example `(2026-W46)` (`render/markdown.week_marker`). The heading `Week of {Monday} {marker}` always ends with it, exactly. Call `doc_contains_text(doc_id, marker)`; the server matches exactly and case-sensitively and replies `found: true` / `found: false` (any other reply is a failure, never "not published"). Found → log "already published", skip both steps, status `skipped`, exit 0. The Doc is the record, so this is the guard on GitHub Actions too. The tool is required: `pulse doctor` checks it, and without it nothing is published.
+2. **Append** with `append_to_doc(doc_id, entry)`. The entry is plain text (no Markdown symbols): a separator line (`────…`), the heading, then the pulse without its own header line (`render/markdown.render_doc_entry`).
 3. **Send** with `send_email(to=<PULSE_RECIPIENT>, subject="Groww Review Pulse — Week of {date}", body=<pulse text + "Full pulse: " + Doc link>)`. Never runs if the append failed.
-4. `publish.json` is rewritten after every step. If the send fails after the append, the next run sends without appending again. With `--force`, the email is sent again; the entry is still appended only when it is missing.
+4. `publish.json` is rewritten after every step (a skip keeps the earlier run's doc and email entries). If the send fails after the append, a re-run on the same machine sends without appending again, even though the marker is in the Doc. `--force` deliberately re-publishes: append and send again.
 
 **Sending rules.** `send_email` is the only sending tool the app may call, only for step 3, and only to `PULSE_RECIPIENT`:
 - a tool whose name contains `send` may be mapped only to the `gmail.send_email` action (MCP-03);
@@ -246,7 +244,7 @@ publish/
 - `email_sender.send_pulse` refuses any `to` other than the one configured address;
 - the server also restricts recipients to its own `ALLOWED_RECIPIENTS`.
 
-**Known gap (GitHub Actions, until `doc_contains_text` exists):** with no `runs/` kept, nothing stops a second scheduled run for the same week from sending again. With the tool, a failed send after a successful append is not retried automatically on Actions (the heading is already in the Doc). The run fails, so it is visible, and `pulse publish --week … --force` sends it.
+**Known gap (GitHub Actions):** a failed send after a successful append is not retried automatically there (no `publish.json`, and the marker is already in the Doc). The run fails, so it is visible, and `pulse publish --week … --force` re-publishes.
 
 **Auth:** MCP servers handle Google OAuth and their own token storage. The app never reads or stores Google credentials. It only knows how to start or reach the servers (command, args, URL), which it gets from config.
 
@@ -363,7 +361,7 @@ runs/{iso_week}/
 ├── pulse.json                    # structured Pulse
 ├── pulse.md                      # rendered note (what goes into Docs and email)
 ├── validation.json               # check results
-├── publish.json                  # doc_id, heading, append + email status, message_id, timestamps
+├── publish.json                  # doc_id, heading, marker, append + email status, message_id, timestamps
 ├── failure.json                  # only when a run stopped before publishing
 └── llm/                          # LLM engine only: request/response logs (scrubbed text only)
 ```
@@ -565,7 +563,7 @@ AI Agent+MCP/
 | Validator fails (quotes, word count, PII) | The composer tries its next option (rules) or re-prompts (LLM), at most 2 times. **Nothing is published** on a final failure. |
 | MCP server unreachable or tool missing | `pulse doctor` and startup checks report it clearly. Analysis results are kept, so `pulse publish` can be re-run later. |
 | Docs succeeds but Gmail fails | `publish.json` records partial success, and re-running `pulse publish` sends the email without appending again. |
-| Duplicate run for the same week | The week's heading in the Doc (`doc_contains_text`) or a sent email in `publish.json` skips both steps; `--force` re-sends. |
+| Duplicate run for the same week | The week's marker, e.g. `(2026-W46)`, found in the Doc (`doc_contains_text`) skips both steps and exits 0; `--force` re-publishes. |
 | `PULSE_DOC_ID` missing or wrong | Missing: stop before any call. Wrong or not shared: `append_to_doc` fails clearly and nothing is sent; no doc is ever created. |
 
 ---
@@ -602,7 +600,7 @@ AI Agent+MCP/
 
 | # | Decision | Options | Current leaning | Status (2026-11-22) |
 |---|---|---|---|---|
-| 1 | Which Docs and Gmail MCP servers | A community Google Workspace MCP server (stdio), a hosted connector, or the environment's built-in connectors | Whatever the course environment provides; isolated behind `tool_map.yaml` | **Settled (2026-11-22, project owner): the project's own [gworkspace-mcp](https://github.com/tejasgs-dev/GmailGdocMCPServer), deployed on Render**, one server for Docs and Gmail over Streamable HTTP (`https://gworkspace-mcp.onrender.com/mcp`, `Authorization: Bearer <PULSE_MCP_API_KEY>`). It holds the Google OAuth token; in remote mode `send_email` is exposed only with `ENABLE_SEND_EMAIL=true`, and it accepts only its `ALLOWED_RECIPIENTS`. Its tools report results and errors as text, so `tool_map.yaml` gives a success and a not-found pattern per action. **Update (2026-11-22, project owner): send, not draft.** The pulse is appended to one hand-made Doc (`PULSE_DOC_ID`) and emailed with `send_email`. **Gap:** the server has no read-only way to check a doc's text, so the duplicate check (`doc_contains_text`, README "No double sending") must be added to it; until then `publish.json` is the guard. |
+| 1 | Which Docs and Gmail MCP servers | A community Google Workspace MCP server (stdio), a hosted connector, or the environment's built-in connectors | Whatever the course environment provides; isolated behind `tool_map.yaml` | **Settled (2026-11-22, project owner): the project's own [gworkspace-mcp](https://github.com/tejasgs-dev/GmailGdocMCPServer), deployed on Render**, one server for Docs and Gmail over Streamable HTTP (`https://gworkspace-mcp.onrender.com/mcp`, `Authorization: Bearer <PULSE_MCP_API_KEY>`). It holds the Google OAuth token; in remote mode `send_email` is exposed only with `ENABLE_SEND_EMAIL=true`, and it accepts only its `ALLOWED_RECIPIENTS`. Its tools report results and errors as text, so `tool_map.yaml` gives a success and a not-found pattern per action. **Update (2026-11-22, project owner): send, not draft.** The pulse is appended to one hand-made Doc (`PULSE_DOC_ID`) and emailed with `send_email`. The server now has the read-only `doc_contains_text` (exact, case-sensitive; replies `found: true/false`), which the publisher requires for its "already published" check. |
 | 2 | Play Store data path | Manual export files vs. a public-listing fetcher | Export files first; fetcher only after a Terms of Service check | **Settled (revised 2026-11-21): public listing via `google-play-scraper`, approved by the project owner for this course project.** Reason: the brief names the Play Store listing and `com.nextbillion.groww` as the primary target, and only Groww's developers can download a Play Console export, so an export-only rule would leave Android reviews (most of Groww's users) out of scope. Conditions: public listing only, no login or cookies, rate-limited, fetching only what the review window needs (incremental weekly runs, `max_reviews` cap), and no reviewer identity fields read. **Risk accepted:** Google Play's Terms of Service restrict automated access to Play. This is acceptable for a course project but should be re-reviewed before any production or commercial use. Fallback: set `ingest.play_public.enabled: false` to read export files from `data/imports/play/` (mapping in `ingest.play_columns`, Play Console format by default). The problem statement's review-source rule (§6) was amended to match. |
 | 3 | Groww iOS App Store ID | Look up and verify | Must be confirmed before the first App Store ingest | **Settled.** `1404871703` ("Groww Stocks, Mutual Fund, IPO", bundle `com.nextbillion.groww`), confirmed through the iTunes Search API. The `in` RSS feed responds, but intermittently serves empty pages; see §4.1 for how the adapter handles that. |
 | 4 | Non-English reviews | Exclude from quotes vs. translate vs. drop | Count toward volume, exclude from quotes (no translated "verbatim" quotes) | **Settled (2026-11-21, tutor requirement): dropped at ingest.** Only English reviews are kept; Hindi, Hinglish (`hi-Latn`) and every other language are dropped and counted per source (§4.2). The Play Store fetch no longer requests `hl=hi`. |

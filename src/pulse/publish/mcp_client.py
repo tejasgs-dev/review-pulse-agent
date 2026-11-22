@@ -13,8 +13,6 @@ Safety rules enforced here:
 - MCP-04: an argument whose name could trigger sending (`send_now`, ...) is refused.
 - MCP-10: `create_doc` can never be mapped: the pulse goes into one doc made by hand.
 - MCP-01/02: every mapped tool must exist in `list_tools()` with a compatible input schema.
-  `doc_contains_text` is the exception: when the server does not list it yet, the action is
-  simply unavailable and the publisher falls back to publish.json.
 - MCP-07/06: connecting and every call have timeouts, so an unattended run never hangs.
 - MCP-08: a result with `isError`, or whose text matches neither the `ok` nor the `not_found`
   pattern, is a failure.
@@ -41,12 +39,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pulse.config import McpServerConfig
 
 REQUIRED_ACTIONS = {
-    "docs": ("append_to_doc",),
+    # doc_contains_text is the "already published?" check; without it nothing is published.
+    "docs": ("doc_contains_text", "append_to_doc"),
     "gmail": ("send_email",),
 }
-OPTIONAL_ACTIONS: dict[str, tuple[str, ...]] = {"docs": ("doc_contains_text",), "gmail": ()}
-# Mapped, but used only when the server lists the tool (it may not exist yet).
-IF_LISTED = {("docs", "doc_contains_text")}
+OPTIONAL_ACTIONS: dict[str, tuple[str, ...]] = {"docs": (), "gmail": ()}
 SEND_ACTION = ("gmail", "send_email")
 SEND_ARGS = {"to": "{to}", "subject": "{subject}", "body": "{body}"}
 FORBIDDEN_TOOLS = {"create_doc"}                  # MCP-10
@@ -177,8 +174,6 @@ def check_tools(tm: ToolMap, server: str, tools: list[Any]) -> list[str]:
         if srv != server:
             continue
         tool = by_name.get(spec.tool)
-        if tool is None and (srv, action) in IF_LISTED:
-            continue
         if tool is None:
             problems.append(f"{srv}.{action}: the server has no tool {spec.tool!r}")
             continue
@@ -363,8 +358,12 @@ class Caller:
 async def verified_caller(client: Any, tool_map: ToolMap, server: Literal["docs", "gmail"],
                           config: McpServerConfig) -> Caller:
     """A Caller, after checking the map against the server's tools (MCP-01/02)."""
-    with anyio.fail_after(config.call_timeout_seconds):
-        tools = (await client.list_tools()).tools
+    try:
+        with anyio.fail_after(config.call_timeout_seconds):
+            tools = (await client.list_tools()).tools
+    except TimeoutError as e:
+        raise McpCallError(f"list_tools did not answer within "
+                           f"{config.call_timeout_seconds:.0f}s") from e
     problems = check_tools(tool_map, server, tools)
     if problems:
         raise McpSetupError("the MCP tools do not match the tool map: " + "; ".join(problems))

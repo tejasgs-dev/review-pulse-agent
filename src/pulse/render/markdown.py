@@ -155,10 +155,17 @@ _MARKDOWN_LEAD = re.compile(r"^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+(?=\S))")
 _MARKDOWN_INLINE = re.compile(r"\*\*|__|`")
 
 
+def week_marker(week: str) -> str:
+    """'(2026-W46)': the week's unique marker in the shared Doc. The publisher looks for exactly
+    this text (case-sensitive), so finding it means the week was already published."""
+    parse_iso_week(week)                     # only a real ISO week makes a marker
+    return f"({week})"
+
+
 def week_heading(week: str) -> str:
-    """'Week of 9 Nov 2026 (2026-W46)': the heading of a week's entry in the shared Doc. It
-    holds the ISO week, so finding it in the Doc means that week was already published."""
-    return f"{week_of(week)} ({week})"
+    """'Week of 9 Nov 2026 (2026-W46)': the heading of a week's entry; always ends with the
+    exact marker."""
+    return f"{week_of(week)} {week_marker(week)}"
 
 
 def plain_text(text: str) -> str:

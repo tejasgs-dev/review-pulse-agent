@@ -25,8 +25,6 @@
 #   - create_doc can never be mapped (MCP-10).
 # At startup every mapped tool must exist in list_tools(), every argument must be in the
 # tool's input schema, and every required schema field must be given (MCP-01, MCP-02).
-# doc_contains_text is the one exception: until the server has it, it is skipped and the
-# publisher relies on runs/{week}/publish.json to avoid sending twice.
 
 docs:
   append_to_doc:
@@ -34,13 +32,15 @@ docs:
     args: { document_id: "{doc_id}", content: "{content}", add_newline_before: true }
     ok: "^Appended (?P<count>\\d+) characters to '(?P<title>.*)'\\.$"
     not_found: "^Document not found"
-  # Read-only duplicate check: is this week's heading already in the doc? Add the tool to the
-  # server first (see README, "No double sending").
+  # Read-only "already published?" check, run before anything is written or sent. `text` is
+  # the week's marker, e.g. "(2026-W46)"; the server matches it exactly (case-sensitive) in
+  # the doc body and replies "found: true" or "found: false". Anything else (a missing doc,
+  # a permission error) is a failure, so nothing is published.
   doc_contains_text:
     tool: doc_contains_text
     args: { document_id: "{doc_id}", text: "{text}" }
-    ok: "^Text found in '(?P<title>.*)'\\.$"
-    not_found: "^Text not found in '"
+    ok: "^found: true$"
+    not_found: "^found: false$"
 
 gmail:
   send_email:

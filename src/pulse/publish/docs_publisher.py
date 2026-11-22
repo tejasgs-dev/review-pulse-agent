@@ -1,11 +1,12 @@
 """Append a week's entry to the one shared Google Doc through MCP (architecture §4.7).
 
 The Doc is made by hand once; its ID is PULSE_DOC_ID. Each week adds a separator line, a
-heading like "Week of 9 Nov 2026 (2026-W46)" and the pulse as plain text. No doc is ever
+heading like "Week of 9 Nov 2026 (2026-W46)" and the pulse as plain text. The heading always
+holds the week's marker, "(2026-W46)". No doc is ever
 created (`create_doc` cannot even be mapped).
 
-`week_in_doc` is the duplicate check: when the server has the read-only `doc_contains_text`
-tool, a week whose heading is already in the Doc is neither appended nor emailed again.
+`week_in_doc` is the duplicate check: the server's read-only `doc_contains_text` tool looks
+for the marker (exact, case-sensitive); a week whose marker is in the Doc is already published.
 """
 
 from __future__ import annotations
@@ -21,11 +22,9 @@ class AppendResult:
     chars: int
 
 
-async def week_in_doc(caller: Caller, *, doc_id: str, heading: str) -> bool | None:
-    """True/False when the server can check; None when it has no `doc_contains_text` tool."""
-    if not caller.has("doc_contains_text"):
-        return None
-    r = await caller.call("doc_contains_text", doc_id=doc_id, text=heading)
+async def week_in_doc(caller: Caller, *, doc_id: str, marker: str) -> bool:
+    """Whether the week's marker is already in the Doc (exact, case-sensitive)."""
+    r = await caller.call("doc_contains_text", doc_id=doc_id, text=marker)
     return r.status == "ok"
 
 
