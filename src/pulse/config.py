@@ -1,0 +1,228 @@
+"""Load and validate config/pulse.yaml (architecture §8)."""
+
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from dotenv import load_dotenv
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "pulse.yaml"
+
+_ENV_REF = re.compile(r"\$\{([A-Z0-9_]+)\}")
+_EMAIL = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[A-Za-z]{2,}$")
+
+
+class ConfigError(ValueError):
+    """The config file is missing, unreadable, or invalid."""
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class ProductConfig(_Strict):
+    name: str
+    play_package: str
+    app_store_id: str = Field(pattern=r"^\d+$")
+    app_store_country: str = Field(pattern=r"^[a-z]{2}$")
+
+
+class WindowConfig(_Strict):
+    weeks_back: int = Field(ge=8, le=12)
+    timezone: str = "Asia/Kolkata"
+
+
+class PathsConfig(_Strict):
+    data_dir: str = "data"
+    runs_dir: str = "runs"
+
+    @property
+    def data_path(self) -> Path:
+        return _resolve(self.data_dir)
+
+    @property
+    def runs_path(self) -> Path:
+        return _resolve(self.runs_dir)
+
+
+def _resolve(p: str) -> Path:
+    path = Path(p)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+PLAY_FIELDS_REQUIRED = frozenset({"rating", "text", "date"})
+PLAY_FIELDS_ALLOWED = PLAY_FIELDS_REQUIRED | {"review_id", "title", "updated", "app_version"}
+
+
+class PlayPublicConfig(_Strict):
+    enabled: bool = False
+    langs: list[str] = Field(default_factory=lambda: ["en"], min_length=1)
+    country: str = Field(default="in", pattern=r"^[a-z]{2}$")
+    batch_size: int = Field(default=200, ge=10, le=500)
+    max_reviews: int = Field(default=40_000, ge=100)
+
+
+class IngestConfig(_Strict):
+    request_delay_seconds: float = Field(default=1.5, ge=0)
+    max_retries: int = Field(default=3, ge=0, le=10)
+    user_agent: str
+    app_store_max_pages: int = Field(default=10, ge=1, le=10)
+    overlap_days: int = Field(default=3, ge=0, le=14)
+    min_words: int = Field(default=9, ge=1)
+    play_public: PlayPublicConfig = PlayPublicConfig()
+    max_malformed_ratio: float = Field(default=0.10, ge=0, le=1)
+    play_columns: dict[str, str]
+
+    @field_validator("play_columns")
+    @classmethod
+    def _known_columns(cls, v: dict[str, str]) -> dict[str, str]:
+        missing = PLAY_FIELDS_REQUIRED - v.keys()
+        if missing:
+            raise ValueError(f"play_columns is missing mappings for: {sorted(missing)}")
+        unknown = v.keys() - PLAY_FIELDS_ALLOWED
+        if unknown:
+            raise ValueError(
+                f"play_columns has unsupported fields {sorted(unknown)}; allowed: "
+                f"{sorted(PLAY_FIELDS_ALLOWED)} (identity fields are never read)"
+            )
+        return v
+
+
+class PrivacyConfig(_Strict):
+    number_min_digits: int = Field(default=8, ge=6)
+    reference_min_digits: int = Field(default=5, ge=3)
+
+
+class AnalysisConfig(_Strict):
+    max_themes: int = Field(default=5, ge=3, le=5)
+    top_themes: int = 3
+    quotes: int = 3
+    actions: int = 3
+    max_words: int = Field(default=250, gt=0)
+    min_reviews: int = Field(default=50, ge=1)
+    quote_min_words: int = Field(default=8, ge=1)
+    quote_max_words: int = Field(default=60, ge=1)
+    seed_themes: list[str] = Field(default_factory=list)
+    # Theme clustering (architecture §4.4, plan Phase 3 S1–S6).
+    max_discovery_reviews: int = Field(default=3000, ge=100)  # above this, Pass A samples
+    assign_batch_size: int = Field(default=500, ge=20, le=1000)
+    assign_concurrency: int = Field(default=3, ge=1, le=8)
+    min_theme_share: float = Field(default=0.03, ge=0, le=0.5)
+    max_other_share: float = Field(default=0.25, ge=0, le=1)
+    recency_days: int = Field(default=14, ge=1, le=56)
+    consistency_sample: int = Field(default=100, ge=0)  # 0 turns the probe off
+    min_agreement: float = Field(default=0.85, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> AnalysisConfig:
+        if self.top_themes > self.max_themes:
+            raise ValueError("top_themes cannot exceed max_themes")
+        if self.quote_min_words > self.quote_max_words:
+            raise ValueError("quote_min_words cannot exceed quote_max_words")
+        return self
+
+
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+class EffortConfig(_Strict):
+    cluster: Effort = "high"
+    assign: Effort = "medium"
+    compose: Effort = "high"
+
+
+class LlmConfig(_Strict):
+    model: str
+    effort: EffortConfig = EffortConfig()
+    fallbacks: str | None = "default"
+
+
+class PublishConfig(_Strict):
+    docs_folder_id: str | None = None
+    recipient: str | None = None
+    doc_title: str
+
+    @field_validator("docs_folder_id", "recipient", mode="before")
+    @classmethod
+    def _blank_is_none(cls, v: object) -> object:
+        return None if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("recipient")
+    @classmethod
+    def _one_valid_address(cls, v: str | None) -> str | None:
+        # Edge case GML-01: exactly one valid address, never a list.
+        if v is not None and not _EMAIL.match(v.strip()):
+            raise ValueError("recipient must be exactly one valid email address")
+        return v.strip() if v else v
+
+    @field_validator("doc_title")
+    @classmethod
+    def _has_week(cls, v: str) -> str:
+        if "{iso_week}" not in v:
+            raise ValueError("doc_title must contain {iso_week} so each week gets its own doc")
+        return v
+
+
+class McpServerConfig(_Strict):
+    transport: Literal["stdio", "http"] = "stdio"
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    url: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.url) if self.transport == "http" else bool(self.command.strip())
+
+
+class McpConfig(_Strict):
+    docs: McpServerConfig
+    gmail: McpServerConfig
+    tool_map: str
+
+
+class PulseConfig(_Strict):
+    product: ProductConfig
+    window: WindowConfig
+    paths: PathsConfig = PathsConfig()
+    ingest: IngestConfig
+    privacy: PrivacyConfig = PrivacyConfig()
+    analysis: AnalysisConfig
+    llm: LlmConfig
+    publish: PublishConfig
+    mcp: McpConfig
+
+
+def _expand_env(value: object) -> object:
+    """Replace ${VAR} with the environment value (empty string when unset)."""
+    if isinstance(value, str):
+        return _ENV_REF.sub(lambda m: os.environ.get(m.group(1), ""), value)
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env(v) for v in value]
+    return value
+
+
+def load_config(path: Path | str | None = None, *, load_env_file: bool = True) -> PulseConfig:
+    """Read the YAML config, expand ${VAR} references, and validate it."""
+    if load_env_file:
+        load_dotenv(PROJECT_ROOT / ".env", override=False)
+    cfg_path = Path(path) if path else DEFAULT_CONFIG_PATH
+    try:
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as e:
+        raise ConfigError(f"Config file not found: {cfg_path}") from e
+    except yaml.YAMLError as e:
+        raise ConfigError(f"Config file is not valid YAML: {cfg_path}: {e}") from e
+    if not isinstance(raw, dict):
+        raise ConfigError(f"Config file must be a mapping: {cfg_path}")
+    try:
+        return PulseConfig.model_validate(_expand_env(raw))
+    except ValueError as e:
+        raise ConfigError(f"Invalid config in {cfg_path}:\n{e}") from e

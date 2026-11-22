@@ -1,0 +1,89 @@
+# Non-secret settings (architecture §8). Secrets and per-user values come from
+# environment variables or .env; ${VAR} references are expanded at load time.
+
+product:
+  name: Groww
+  play_package: com.nextbillion.groww
+  app_store_id: "1404871703"        # verified 2026-11-21 via the iTunes Search API (§13 #3)
+  app_store_country: in
+
+window:
+  weeks_back: 10                    # 8–12
+  timezone: Asia/Kolkata
+
+paths:
+  data_dir: data                    # relative to the project root; git-ignored
+  runs_dir: runs
+
+ingest:
+  request_delay_seconds: 1.5        # polite throttling between feed requests
+  max_retries: 3                    # per feed page, with exponential backoff
+  user_agent: "review-pulse/0.1 (+public review analysis)"
+  app_store_max_pages: 10
+  overlap_days: 3                   # incremental runs re-fetch this many days to catch edits
+  # Cleaning rules (normalize.py), in order: strip emojis, drop reviews with no text left,
+  # drop reviews under min_words words, drop anything that is not English.
+  min_words: 9                      # "more than 8 words"; counted after emojis are removed
+  # Play Store public listing via google-play-scraper: no login, rate-limited (the delay
+  # above applies between requests). Approved for this course project, see §13 #2.
+  # Set enabled: false to fall back to export files in data/imports/play/.
+  play_public:
+    enabled: true
+    langs: [en]                     # hl= filters reviews by language; only English is kept
+    country: in
+    batch_size: 200                 # reviews per request
+    max_reviews: 40000              # hard stop per run, so a backfill stays bounded
+  max_malformed_ratio: 0.10         # a Play export file with more bad rows than this is skipped
+  # Logical field -> column name in the export (§13 #2). Only these fields can be
+  # mapped, so identity columns (author, device, reviewer language) are never read.
+  # Required: rating, text, date. Timestamps without a time zone are read as UTC.
+  play_columns:
+    review_id: "Review Link"
+    rating: "Star Rating"
+    title: "Review Title"
+    text: "Review Text"
+    date: "Review Submit Date and Time"
+    updated: "Review Last Update Date and Time"
+    app_version: "App Version Name"
+
+privacy:
+  number_min_digits: 8              # digit runs this long become [number] (Groww ticket numbers are 8)
+  reference_min_digits: 5           # shorter numbers right after "ticket", "order", "UTR", ... too
+                                    # amounts after ₹ / Rs / INR are never redacted
+
+analysis:
+  max_themes: 5
+  top_themes: 3
+  quotes: 3
+  actions: 3
+  max_words: 250
+  min_reviews: 50
+  quote_min_words: 8
+  quote_max_words: 60
+  seed_themes: [onboarding_kyc, payments, withdrawals, performance_bugs,
+                charges, support, trading_features, statements_tax]
+  # Theme clustering (§4.4). Pass A reads every review up to max_discovery_reviews,
+  # then a stratified sample; Pass B assigns in batches run assign_concurrency at a time.
+  max_discovery_reviews: 3000
+  assign_batch_size: 500
+  assign_concurrency: 3
+  min_theme_share: 0.03             # smaller themes get a small_theme warning
+  max_other_share: 0.25             # above this, Pass A runs once more with `other` examples
+  recency_days: 14                  # "recent" window for recency_weight
+  consistency_sample: 100           # reviews assigned twice to measure agreement (0 = off)
+  min_agreement: 0.85               # below this, the probe records a warning
+
+llm:
+  model: claude-opus-5-5
+  effort: { cluster: high, assign: medium, compose: high }
+  fallbacks: default
+
+publish:
+  docs_folder_id: ${PULSE_DOCS_FOLDER_ID}
+  recipient: ${PULSE_RECIPIENT}
+  doc_title: "Groww Weekly Review Pulse — {iso_week}"
+
+mcp:                                # filled in once §13 #1 is settled
+  docs:  { transport: stdio, command: "", args: [] }
+  gmail: { transport: stdio, command: "", args: [] }
+  tool_map: src/pulse/publish/tool_map.yaml

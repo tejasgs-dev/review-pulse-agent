@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "review-pulse"
+version = "0.1.0"
+description = "Weekly pulse of public Groww app reviews, published to Google Docs and Gmail via MCP."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.70",
+    "mcp>=1.10",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "typer>=0.12",
+    "httpx>=0.27",
+    "pandas>=2.2",
+    "pyarrow>=16.0",
+    "langdetect>=1.0.9",
+    # Play Store public listing (§13 #2). Pinned: its request format and parser are used
+    # directly (see ingest/play_public.py), and those internals can change in any release.
+    "google-play-scraper>=1.2.7,<1.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+pulse = "pulse.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pulse"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: calls the real Claude API (costs money); run with -m slow"]
+addopts = "-m 'not slow'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]

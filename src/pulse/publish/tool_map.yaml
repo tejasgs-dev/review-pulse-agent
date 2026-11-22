@@ -1,0 +1,13 @@
+# Logical publish actions -> concrete MCP tool names (architecture §4.7).
+# Fill in once the Docs and Gmail MCP servers are chosen (§13 #1).
+# Any tool whose name contains "send" is refused at startup.
+
+docs:
+  find_doc: null
+  create_doc: null
+  replace_doc_body: null
+  move_to_folder: null
+
+gmail:
+  create_draft: null
+  update_draft: null      # optional

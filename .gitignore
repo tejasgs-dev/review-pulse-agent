@@ -1,0 +1,17 @@
+# Review data and run artifacts: never commit, even when scrubbed (architecture §6)
+data/
+runs/
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
