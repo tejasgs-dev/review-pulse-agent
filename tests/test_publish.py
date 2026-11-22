@@ -272,6 +272,50 @@ def test_a_failed_check_stops_before_appending(pcfg, fake_mcp):
     assert fake_mcp.tool_names() == ["doc_contains_text"] and fake_mcp.sent == []
 
 
+def test_a_failed_check_keeps_the_earlier_publish_record(pcfg, fake_mcp):
+    write_week(pcfg)
+    first = publish_week(pcfg, WEEK)
+    fake_mcp.fail["doc_contains_text"] = "Google API error 400: Field mask may not contain"
+    with pytest.raises(PublishError) as e:
+        publish_week(pcfg, WEEK)
+    assert e.value.server_tool == "doc_contains_text" and e.value.step == "check"
+    saved = read_record(pcfg.paths.runs_path, WEEK)
+    assert saved["status"] == "failed" and saved["failed_step"] == "check"
+    assert saved["check"]["status"] == "failed" and "Field mask" in saved["check"]["error"]
+    assert saved["doc"] == first["doc"]                 # the earlier entries are kept
+    assert saved["email"] == first["email"]
+    assert saved["email"]["message_id"] == first["email"]["message_id"]
+    del fake_mcp.fail["doc_contains_text"]               # fixed: the week counts as published
+    fake_mcp.calls.clear()
+    assert publish_week(pcfg, WEEK)["status"] == "skipped"
+    assert fake_mcp.tool_names() == ["doc_contains_text"] and len(fake_mcp.sent) == 1
+    assert read_record(pcfg.paths.runs_path, WEEK)["email"]["message_id"] == \
+        first["email"]["message_id"]
+
+
+def test_a_failed_connection_step_keeps_the_earlier_record(pcfg, fake_mcp):
+    write_week(pcfg)
+    first = publish_week(pcfg, WEEK)
+    fake_mcp.with_contains = False                       # list_tools no longer matches
+    with pytest.raises(PublishError) as e:
+        publish_week(pcfg, WEEK)
+    assert e.value.setup and e.value.step == "connect" and e.value.server_tool is None
+    saved = read_record(pcfg.paths.runs_path, WEEK)
+    assert saved["failed_step"] == "connect" and saved["email"] == first["email"]
+
+
+def test_a_failed_send_keeps_the_previous_email_under_previous(pcfg, fake_mcp):
+    write_week(pcfg)
+    first = publish_week(pcfg, WEEK)
+    fake_mcp.fail["send_email"] = "Google API error 500: backend"
+    with pytest.raises(PublishError):
+        publish_week(pcfg, WEEK, force=True)
+    saved = read_record(pcfg.paths.runs_path, WEEK)
+    assert saved["status"] == "partial" and saved["failed_step"] == "send"
+    assert saved["email"]["status"] == "failed"
+    assert saved["email"]["previous"]["message_id"] == first["email"]["message_id"]
+
+
 def test_a_server_without_the_check_tool_publishes_nothing(pcfg, fake_mcp):
     fake_mcp.with_contains = False
     write_week(pcfg)
@@ -410,13 +454,45 @@ def test_doctor_fails_when_the_server_lacks_the_check_tool(publish_config, fake_
     assert "[FAIL] duplicate check tool 'doc_contains_text' is available" in doctor.output
 
 
-def test_cli_publish_failure_exit_code(publish_config, fake_mcp):
+def test_cli_publish_failure_exit_code_and_server_hint(publish_config, fake_mcp):
     path = publish_config()
     write_week(load_config(path, load_env_file=False))
     fake_mcp.fail["send_email"] = "Google API error 500: backend"
     result = runner.invoke(app, ["publish", "--week", WEEK, "--config", str(path)])
     assert result.exit_code == ExitCode.PUBLISH_FAILED
-    assert "run `pulse publish --week 2026-W46` again to resume" in result.output
+    out = " ".join(result.output.split())
+    assert "the MCP server's 'send_email' tool returned an error" in out
+    assert "(the Doc entry was appended, but no email was sent)" in out
+    assert "needs fixing; running again will not help until then" in out
+    assert "again to resume" not in out
+
+
+def test_cli_check_tool_error_says_the_server_needs_fixing(publish_config, fake_mcp):
+    path = publish_config()
+    write_week(load_config(path, load_env_file=False))
+    fake_mcp.fail["doc_contains_text"] = ("Google API error 400: Field mask may not contain "
+                                          "legacy text-level Document resource fields")
+    result = runner.invoke(app, ["publish", "--week", WEEK, "--config", str(path)])
+    assert result.exit_code == ExitCode.PUBLISH_FAILED
+    out = " ".join(result.output.split())
+    assert ("the MCP server's 'doc_contains_text' tool returned an error (nothing was "
+            "appended or sent): the server (or its Google access or settings) needs fixing"
+            ) in out
+    assert f"After the fix, run `pulse publish --week {WEEK}`" in out
+
+
+def test_cli_timeout_still_says_run_again_to_resume(publish_config, fake_mcp):
+    def short(d):
+        d["mcp"]["docs"]["call_timeout_seconds"] = 0.3
+        d["mcp"]["gmail"]["call_timeout_seconds"] = 0.3
+    path = publish_config(short)
+    write_week(load_config(path, load_env_file=False))
+    fake_mcp.delay["doc_contains_text"] = 5
+    result = runner.invoke(app, ["publish", "--week", WEEK, "--config", str(path)])
+    assert result.exit_code == ExitCode.PUBLISH_FAILED
+    out = " ".join(result.output.split())
+    assert "run `pulse publish --week 2026-W46` again to resume (nothing was appended" in out
+    assert "needs fixing" not in out
 
 
 def test_cli_publish_without_doc_id_is_a_config_error(publish_config, fake_mcp, monkeypatch):

@@ -469,8 +469,9 @@ def _publish_stage(cfg: PulseConfig, week: str, *, force: bool = False) -> None:
             update_manifest(cfg.paths.runs_path, week, "publish", _publish_summary(e.record))
         typer.secho(f"  ✗ {e}", fg=typer.colors.RED, err=True)
         if e.record:
-            typer.secho(f"  see {publish_path(cfg.paths.runs_path, week)}; run `pulse publish "
-                        f"--week {week}` again to resume", fg=typer.colors.RED, err=True)
+            typer.secho(f"  {_publish_hint(e, week)}; see "
+                        f"{publish_path(cfg.paths.runs_path, week)}", fg=typer.colors.RED,
+                        err=True)
         raise typer.Exit(ExitCode.CONFIG_ERROR if e.setup and not e.record
                          else ExitCode.PUBLISH_FAILED) from e
     update_manifest(cfg.paths.runs_path, week, "publish", _publish_summary(record))
@@ -479,6 +480,24 @@ def _publish_stage(cfg: PulseConfig, week: str, *, force: bool = False) -> None:
                     f"{record['doc_url']}", fg=typer.colors.YELLOW)
         return
     typer.secho(f"Published {week}: {record['doc_url']}", fg=typer.colors.GREEN)
+
+
+def _publish_hint(e, week: str) -> str:
+    """What to do after a failed publish. A tool error comes from the server itself, so
+    running again only helps after the server (or its Google access or settings) is fixed."""
+    done = {"connect": "nothing was checked, appended or sent",
+            "check": "nothing was appended or sent",
+            "append": "nothing was appended or sent",
+            "send": "the Doc entry was appended, but no email was sent"}.get(e.step, "")
+    done = f" ({done})" if done else ""
+    if e.server_tool:
+        return (f"the MCP server's {e.server_tool!r} tool returned an error{done}: the server "
+                "(or its Google access or settings) needs fixing; running again will not help "
+                f"until then. After the fix, run `pulse publish --week {week}`")
+    if e.setup:
+        return (f"the MCP server does not offer the tools in tool_map.yaml{done}: fix the "
+                f"server or the tool map, then run `pulse publish --week {week}`")
+    return f"run `pulse publish --week {week}` again to resume{done}"
 
 
 def _publish_summary(record: dict) -> dict:

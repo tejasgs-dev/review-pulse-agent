@@ -59,6 +59,15 @@ class McpCallError(RuntimeError):
     """A tool call failed (error result, unexpected text, timeout, lost connection)."""
 
 
+class McpToolError(McpCallError):
+    """The server answered, but its tool reported an error (`isError`, or text that is neither
+    success nor not-found). Retrying will not help until the server or its setup is fixed."""
+
+    def __init__(self, tool: str, message: str) -> None:
+        super().__init__(message)
+        self.tool = tool
+
+
 def mcp_error(exc: BaseException) -> McpSetupError | McpCallError | None:
     """The McpSetupError/McpCallError inside `exc`. MCP clients run in task groups, which wrap
     errors raised in their scope in (nested) exception groups."""
@@ -205,13 +214,13 @@ def result_text(result: Any) -> str:
 def interpret(spec: ActionSpec, result: Any) -> ToolOutcome:
     text = result_text(result)
     if result.is_error:
-        raise McpCallError(f"{spec.tool} failed: {text or 'error result with no text'}")
+        raise McpToolError(spec.tool, f"{spec.tool} failed: {text or 'error result with no text'}")
     m = re.search(spec.ok, text, re.S)
     if m:
         return ToolOutcome("ok", text, {k: v for k, v in m.groupdict().items() if v is not None})
     if spec.not_found and re.search(spec.not_found, text, re.S):
         return ToolOutcome("not_found", text)
-    raise McpCallError(f"{spec.tool} failed: {text[:300] or 'empty result'}")
+    raise McpToolError(spec.tool, f"{spec.tool} failed: {text[:300] or 'empty result'}")
 
 
 # ---------------------------------------------------------------------------- connecting

@@ -40,6 +40,7 @@ from pulse.publish.email_sender import email_body, send_pulse
 from pulse.publish.mcp_client import (
     McpCallError,
     McpSetupError,
+    McpToolError,
     describe,
     load_tool_map,
     verified_caller,
@@ -53,10 +54,13 @@ class PublishError(RuntimeError):
     """Publishing stopped; publish.json says which steps succeeded."""
 
     def __init__(self, message: str, *, record: dict[str, Any] | None = None,
-                 setup: bool = False) -> None:
+                 setup: bool = False, server_tool: str | None = None,
+                 step: str | None = None) -> None:
         super().__init__(message)
         self.record = record or {}
         self.setup = setup
+        self.server_tool = server_tool   # the MCP tool that reported an error, if one did
+        self.step = step                 # connect | check | append | send
 
 
 def publish_path(runs_dir: Path, week: str) -> Path:
@@ -133,8 +137,11 @@ def publish_week(cfg: PulseConfig, week: str, *, force: bool = False,
         "doc_id": cfg.publish.doc_id, "doc_url": cfg.publish.doc_url, "started_at": _now(),
         "status": "running", "forced": force, "duplicate_check": None,
         "servers": {"docs": describe(cfg.mcp.docs), "gmail": describe(cfg.mcp.gmail)},
-        "doc": {}, "email": {}, "calls": [],
+        # The earlier run's entries, kept until a step of this run actually replaces them, so a
+        # failed check (or connection) never loses what was already published.
+        "doc": dict(prior_doc), "email": dict(prior_email), "calls": [],
     }
+    record["_step"] = "connect"
     # What this machine did last time: the entry appended here, and whether it was emailed.
     record["_appended_here"] = prior_doc.get("status") == "ok"
     record["_sent_here"] = prior_email.get("status") == "sent"
@@ -158,8 +165,12 @@ def publish_week(cfg: PulseConfig, week: str, *, force: bool = False,
         if e is None:
             save("failed")
             raise
-        save("partial" if record["doc"].get("status") in ("ok", "present") else "failed")
-        raise PublishError(str(e), record=record, setup=isinstance(e, McpSetupError)) from e
+        step = record["_step"]
+        record["failed_step"] = step
+        save("partial" if step == "send" else "failed")   # send: the entry is in the Doc
+        raise PublishError(str(e), record=record, setup=isinstance(e, McpSetupError),
+                           server_tool=e.tool if isinstance(e, McpToolError) else None,
+                           step=step) from e
     save(record["status"] if record["status"] == "skipped" else "sent")
     return record
 
@@ -191,8 +202,8 @@ def _skip(record, save, echo: Echo, reason: str) -> bool:
     echo(f"  {record['week']} already published ({reason}): not appended or emailed again "
          "(use --force to re-publish)")
     prior = record["_prior"]          # keep what earlier runs recorded (e.g. the message ID)
-    record["doc"] = prior["doc"] or {"status": "present", "at": _now()}
-    record["email"] = (prior["email"] if prior["email"].get("status") == "sent"
+    record["doc"] = dict(prior["doc"]) or {"status": "present", "at": _now()}
+    record["email"] = (dict(prior["email"]) if prior["email"].get("status") == "sent"
                        else {"status": "skipped", "reason": f"already published ({reason})"})
     record["status"] = "skipped"
     record["skip_reason"] = f"already published ({reason})"
@@ -204,20 +215,31 @@ async def _doc_step(docs, cfg: PulseConfig, doc_text, record, save, echo: Echo) 
     """Append the week's entry unless it is already published. False: stop, send nothing."""
     doc_id, marker = cfg.publish.doc_id, record["marker"]
     resume = record["_appended_here"] and not record["_sent_here"]
+    record["_step"] = "check"
     try:
         present = await week_in_doc(docs, doc_id=doc_id, marker=marker)
-        record["duplicate_check"] = "doc_contains_text"
-        if not record["forced"]:
-            if present and not resume:
-                return _skip(record, save, echo, f"{marker} is in the Doc")
-            if present and resume:
-                echo("  Doc entry already appended by the last run: only the email is sent")
-                record["doc"] = {"status": "present", "resumed": True, "at": _now()}
-                save()
-                return True
+    except (McpSetupError, McpCallError) as e:
+        # Nothing was checked, appended or sent: the earlier doc/email entries stay as they are.
+        record["check"] = {"status": "failed", "error": str(e), "at": _now()}
+        save()
+        raise
+    record["duplicate_check"] = "doc_contains_text"
+    record["check"] = {"status": "ok", "found": present, "at": _now()}
+    if not record["forced"]:
+        if present and not resume:
+            return _skip(record, save, echo, f"{marker} is in the Doc")
+        if present and resume:
+            echo("  Doc entry already appended by the last run: only the email is sent")
+            record["doc"] = {**record["doc"], "resumed_at": _now()}
+            save()
+            return True
+    record["_step"] = "append"
+    try:
         r = await append_entry(docs, doc_id=doc_id, content=doc_text)
     except (McpSetupError, McpCallError) as e:
-        record["doc"] = {"status": "failed", "error": str(e), "at": _now()}
+        previous = record["_prior"]["doc"]
+        record["doc"] = {"status": "failed", "error": str(e), "at": _now(),
+                         **({"previous": previous} if previous else {})}
         save()
         raise
     record["doc"] = {"status": "ok", "action": "appended", "doc_title": r.title,
@@ -231,11 +253,14 @@ async def _email_step(client, cfg: PulseConfig, tool_map, art, record, save,
                       echo: Echo) -> None:
     gmail = await verified_caller(client, tool_map, "gmail", cfg.mcp.gmail)
     to = cfg.publish.recipient
+    record["_step"] = "send"
     try:
         body = email_body(art["body"], cfg.publish.doc_url or "")
         r = await send_pulse(gmail, recipient=to, to=to, subject=art["subject"], body=body)
     except (McpSetupError, McpCallError) as e:
-        record["email"] = {"status": "failed", "error": str(e), "at": _now()}
+        previous = record["_prior"]["email"]
+        record["email"] = {"status": "failed", "error": str(e), "at": _now(),
+                           **({"previous": previous} if previous else {})}
         save()
         raise
     finally:
