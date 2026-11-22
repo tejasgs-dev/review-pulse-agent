@@ -11,7 +11,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from pulse.analysis.cluster import run_clustering
+from pulse.analysis.engines.llm_cluster import run_llm_clustering
 from pulse.analysis.llm import build_llm
 from pulse.analysis.rank import GENERAL_PRAISE
 from pulse.models import CleanReview
@@ -86,7 +86,7 @@ def test_live_clustering_on_synthetic_reviews(cfg):
     multi_ids = {r.id for r in reviews if "(case" in r.canonical_text
                  and any(m[1] in r.canonical_text for m in MULTI)}
     llm = build_llm(cfg.llm)
-    result = run_clustering(llm, reviews, cfg, week="2026-W46",
+    result = run_llm_clustering(llm, reviews, cfg, week="2026-W46",
                             window=(date(2026, 9, 7), date(2026, 11, 15)))
 
     assert len(result.themes) <= 5

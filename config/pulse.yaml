@@ -52,6 +52,41 @@ privacy:
                                     # amounts after ₹ / Rs / INR are never redacted
 
 analysis:
+  # local (default): sentence embeddings + k-means, rules and templates; free, offline after
+  # the first model download, deterministic. llm: the Claude API (optional `[llm]` extra,
+  # needs ANTHROPIC_API_KEY, costs money). `--engine` on the CLI overrides this.
+  engine: local
+  theme_catalogue: config/themes.yaml   # labels, keywords and templates (§4.4, §4.5)
+  local:
+    model: minishlab/potion-base-8M     # model2vec static embeddings, about 30 MB
+    model_revision: bf8b056651a2c21b8d2565580b8569da283cab23   # pinned; cached in data/models/
+    micro_clusters: 12                  # k-means over-clustering before routing
+    micro_clusters_retry: 16            # used once if `other` is above max_other_share
+    n_init: 50
+    seed: 42
+    min_stability: 0.75                 # median ARI vs seeds 43–45; picks the number of themes
+    other_cosine: 0.40                  # a review this far from its theme goes to `other`
+    secondary_margin: 0.05              # second-nearest theme within this -> secondary theme
+    loose_cohesion: 0.55                # a micro-cluster looser than this goes to `other`
+    # General praise: 4–5★, a praise word, and none of the specific words.
+    praise_words: [good, great, best, nice, excellent, awesome, amazing, love, superb, easy,
+                   smooth, helpful, wonderful, fantastic, perfect, user friendly, simple]
+    specific_words: [but, however, please, pls, plz, kindly, issue, problem, bug, fix, add,
+                     not, "no", never, slow, lag, crash, hang, charge, charges, fee, brokerage,
+                     support, withdraw, withdrawal, kyc, refund, loss, fraud, scam, update,
+                     should, need, want, why, worst, bad, poor, improve, feature, option]
+    # Micro-clusters whose top keywords are mostly these become `other` (venting, Hinglish).
+    vague_words: [worst, bad, useless, experience, poor, waste, install, uninstall, rating,
+                  star, thank, thanks, lost, fraud, hai, bhi, ho, rha, ke, par, hindi, nahi,
+                  kya, mai, hain, se, ka, ki]
+    # Capitalized words that are never taken for a person's name in quotes (PII-11).
+    name_allowlist: [Groww, UPI, IPO, IPOs, SIP, SIPs, NSE, BSE, Nifty, Sensex, Bank, India,
+                     Indian, Android, iPhone, iPad, iOS, Google, Play, Store, App, Apple,
+                     Zerodha, Upstox, Angel, Paytm, PhonePe, GPay, Aadhaar, Aadhar, PAN, KYC,
+                     NAV, ETF, ETFs, MTF, GTT, F&O, FnO, OTP, TradingView, Hindi, English,
+                     January, February, March, April, May, June, July, August, September,
+                     October, November, December, Monday, Tuesday, Wednesday, Thursday,
+                     Friday, Saturday, Sunday, Diwali, Rs, INR, US, USA, AI]
   max_themes: 5
   top_themes: 3
   quotes: 3

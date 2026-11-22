@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from pulse.analysis.cluster import Discovery, run_clustering
+from pulse.analysis.cluster import load_prompt
 from pulse.analysis.compose import (
     ActionDraft,
     ComposeError,
@@ -13,12 +13,12 @@ from pulse.analysis.compose import (
     ThemeSummary,
     build_contexts,
     build_quotes,
-    compose_pulse,
-    load_prompt,
     select_candidates,
     sentence_spans,
     write_compose_artifacts,
 )
+from pulse.analysis.engines.llm_cluster import Discovery, run_llm_clustering
+from pulse.analysis.engines.llm_compose import compose_pulse_llm
 from pulse.models import CleanReview
 from tests.fake_llm import FakeLlm, default_write, theme
 
@@ -57,7 +57,7 @@ def clustered(cfg, reviews, **fake_kw):
     disc = Discovery(themes=[theme(t, ["r0001", "r0002", "r0003"], label=t.title())
                              for t in THEMES], taxonomy_changes=[])
     llm = FakeLlm([disc], labeller, **fake_kw)
-    return llm, run_clustering(llm, reviews, cfg, week="2026-W46", window=WINDOW)
+    return llm, run_llm_clustering(llm, reviews, cfg, week="2026-W46", window=WINDOW)
 
 
 # ------------------------------------------------------------------ sentences
@@ -176,7 +176,7 @@ def test_quote_prompt_skips_named_people(cfg):  # PII-11, CMP-05
     reviews[0] = replace(reviews[0], canonical_text="Rahul from support was rude and closed "
                          "my withdrawal ticket without any help at all.")
     llm, cluster = clustered(cfg, reviews)
-    compose_pulse(llm, cluster, reviews, cfg)
+    compose_pulse_llm(llm, cluster, reviews, cfg)
     pick_call = next(c for c in llm.calls if c["schema"] == "QuotePicks")
     assert "Rahul from support" in pick_call["prefix"]
     assert "names a person" in pick_call["system"]
@@ -188,7 +188,7 @@ def test_quote_prompt_skips_named_people(cfg):  # PII-11, CMP-05
 def test_compose_first_attempt(cfg, tmp_path):
     reviews = corpus()
     llm, cluster = clustered(cfg, reviews)
-    result = compose_pulse(llm, cluster, reviews, cfg)
+    result = compose_pulse_llm(llm, cluster, reviews, cfg)
     assert result.report.ok and len(result.attempts) == 1
     p = result.pulse
     assert [t.id for t in p.top_themes] == cluster.top
@@ -218,7 +218,7 @@ def test_bad_quote_pick_retries_quotes_only(cfg):
         return picks
 
     llm, cluster = clustered(cfg, reviews, pick=pick)
-    result = compose_pulse(llm, cluster, reviews, cfg)
+    result = compose_pulse_llm(llm, cluster, reviews, cfg)
     assert len(result.attempts) == 2
     assert result.attempts[1]["redid"] == ["quotes"]
     retry = [c for c in llm.calls if c["name"] == "quote_pick_retry1"]
@@ -238,7 +238,7 @@ def test_bad_writing_retries_writing_only(cfg):
         return w
 
     llm, cluster = clustered(cfg, reviews, write=write)
-    result = compose_pulse(llm, cluster, reviews, cfg)
+    result = compose_pulse_llm(llm, cluster, reviews, cfg)
     assert len(result.attempts) == 2 and result.attempts[1]["redid"] == ["writing"]
     retry = next(c for c in llm.calls if c["name"] == "write_retry1")
     assert "states a statistic" in retry["user"]
@@ -256,7 +256,7 @@ def test_compose_gives_up_after_two_retries(cfg):  # VAL-07
 
     llm, cluster = clustered(cfg, reviews, write=write)
     with pytest.raises(ComposeError) as e:
-        compose_pulse(llm, cluster, reviews, cfg)
+        compose_pulse_llm(llm, cluster, reviews, cfg)
     assert len(e.value.attempts) == 3
     assert all(not a["ok"] for a in e.value.attempts)
     assert "exactly 3 action ideas" in str(e.value)
@@ -271,4 +271,4 @@ def test_theme_without_quotable_reviews_fails_clearly(cfg):  # CMP-01, risk #3
     if "support" not in cluster.top:
         pytest.skip("support not in the top 3 for this fixture")
     with pytest.raises(ComposeError, match="theme support has no quotable review"):
-        compose_pulse(llm, cluster, reviews, cfg)
+        compose_pulse_llm(llm, cluster, reviews, cfg)

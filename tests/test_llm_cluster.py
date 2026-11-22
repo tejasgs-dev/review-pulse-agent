@@ -2,7 +2,8 @@ from datetime import date
 
 import pytest
 
-from pulse.analysis.cluster import (
+from pulse.analysis.cluster import load_prompt, themes_payload, write_themes
+from pulse.analysis.engines.llm_cluster import (
     Assignment,
     AssignmentBatch,
     ClusterError,
@@ -11,14 +12,11 @@ from pulse.analysis.cluster import (
     check_batch,
     discover,
     format_review,
-    load_prompt,
-    run_clustering,
+    run_llm_clustering,
     seeded_shuffle,
     split_batches,
     stratified_sample,
-    themes_payload,
     validate_discovery,
-    write_themes,
 )
 from pulse.analysis.rank import GENERAL_PRAISE, OTHER
 from tests.fake_llm import FakeLlm, clean_reviews, theme
@@ -199,7 +197,7 @@ def test_run_clustering_end_to_end(cfg):
     reviews = clean_reviews(120, rating=lambda i: 1 if i % 3 else 5)
     labels = THEMES + [GENERAL_PRAISE]
     llm = FakeLlm([taxonomy()], round_robin(labels))
-    result = run_clustering(llm, reviews, cfg, week="2026-W46", window=WINDOW)
+    result = run_llm_clustering(llm, reviews, cfg, week="2026-W46", window=WINDOW)
 
     assert len(result.assignments) == 120
     assert len(result.top) == 3
@@ -223,7 +221,7 @@ def test_high_other_share_triggers_exactly_one_rediscovery(cfg):
     # 3 themes + `other` for half the reviews: 50% > 25% both times
     labels = ["money_movement", "app_performance", "support", OTHER, OTHER, OTHER]
     llm = FakeLlm([taxonomy(), taxonomy()], round_robin(labels))
-    result = run_clustering(llm, reviews, cfg, week="2026-W46", window=WINDOW)
+    result = run_llm_clustering(llm, reviews, cfg, week="2026-W46", window=WINDOW)
 
     discover_calls = [c for c in llm.calls if c["schema"] == "Discovery"]
     assert len(discover_calls) == 2
@@ -236,7 +234,7 @@ def test_high_other_share_triggers_exactly_one_rediscovery(cfg):
 def test_other_under_limit_does_not_rediscover(cfg):
     labels = THEMES + [OTHER]  # 20% other
     llm = FakeLlm([taxonomy()], round_robin(labels))
-    result = run_clustering(llm, clean_reviews(50), cfg, week="2026-W46", window=WINDOW)
+    result = run_llm_clustering(llm, clean_reviews(50), cfg, week="2026-W46", window=WINDOW)
     assert sum(c["schema"] == "Discovery" for c in llm.calls) == 1
     assert not result.rediscovered
 
@@ -261,7 +259,7 @@ def test_small_theme_and_low_agreement_warnings(cfg):
             return result
 
     llm = Flaky([taxonomy()], label)
-    result = run_clustering(llm, reviews, cfg, week="2026-W46", window=WINDOW)
+    result = run_llm_clustering(llm, reviews, cfg, week="2026-W46", window=WINDOW)
     codes = [w["code"] for w in result.warnings]
     assert "small_theme" in codes
     assert "low_agreement" in codes
@@ -272,12 +270,12 @@ def test_large_input_uses_a_stratified_sample(tmp_config):
     from pulse.config import load_config
     c = load_config(tmp_config(lambda d: d["analysis"].update(
         {"max_discovery_reviews": 100, "consistency_sample": 0})), load_env_file=False)
-    from pulse.analysis.cluster import week_seed
+    from pulse.analysis.engines.llm_cluster import week_seed
     reviews = clean_reviews(300)
     sample = stratified_sample(seeded_shuffle(reviews, "2026-W46"), 100,
                                week_seed("2026-W46", "sample"))
     llm = FakeLlm([taxonomy(examples=[r.id for r in sample[:3]])], round_robin(THEMES))
-    result = run_clustering(llm, reviews, c, week="2026-W46", window=WINDOW)
+    result = run_llm_clustering(llm, reviews, c, week="2026-W46", window=WINDOW)
     prefix = llm.calls[0]["prefix"]
     assert "a stratified sample of 300" in prefix
     assert prefix.count("★ |") == 100
@@ -289,7 +287,7 @@ def test_large_input_uses_a_stratified_sample(tmp_config):
 def test_write_themes(cfg, tmp_path):
     import json
     llm = FakeLlm([taxonomy()], round_robin(THEMES))
-    result = run_clustering(llm, clean_reviews(40), cfg, week="2026-W46", window=WINDOW)
+    result = run_llm_clustering(llm, clean_reviews(40), cfg, week="2026-W46", window=WINDOW)
     path = write_themes(result, tmp_path)
     data = json.loads(path.read_text(encoding="utf-8"))
     assert path == tmp_path / "2026-W46" / "themes.json"

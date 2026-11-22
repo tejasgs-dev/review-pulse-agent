@@ -99,7 +99,33 @@ class PrivacyConfig(_Strict):
     reference_min_digits: int = Field(default=5, ge=3)
 
 
+class LocalEngineConfig(_Strict):
+    """The default engine (architecture §4.4): embeddings + k-means, rules and templates."""
+
+    model: str = "minishlab/potion-base-8M"
+    model_revision: str = Field(default="bf8b056651a2c21b8d2565580b8569da283cab23",
+                                min_length=7)
+    micro_clusters: int = Field(default=12, ge=4, le=40)
+    micro_clusters_retry: int = Field(default=16, ge=4, le=60)  # when `other` is too large
+    n_init: int = Field(default=50, ge=1, le=500)
+    seed: int = 42
+    min_stability: float = Field(default=0.75, ge=0, le=1)  # median ARI vs 3 other seeds
+    other_cosine: float = Field(default=0.40, ge=0, le=1)
+    secondary_margin: float = Field(default=0.05, ge=0, le=1)
+    loose_cohesion: float = Field(default=0.55, ge=0, le=1)  # median cosine; below = `other`
+    praise_words: list[str] = Field(min_length=1)
+    specific_words: list[str] = Field(min_length=1)
+    vague_words: list[str] = Field(min_length=1)
+    name_allowlist: list[str] = Field(default_factory=list)
+
+
+Engine = Literal["local", "llm"]
+
+
 class AnalysisConfig(_Strict):
+    engine: Engine = "local"
+    theme_catalogue: str = "config/themes.yaml"
+    local: LocalEngineConfig | None = None
     max_themes: int = Field(default=5, ge=3, le=5)
     top_themes: int = 3
     quotes: int = 3
@@ -125,7 +151,13 @@ class AnalysisConfig(_Strict):
             raise ValueError("top_themes cannot exceed max_themes")
         if self.quote_min_words > self.quote_max_words:
             raise ValueError("quote_min_words cannot exceed quote_max_words")
+        if self.engine == "local" and self.local is None:
+            raise ValueError("analysis.local is required when analysis.engine is local")
         return self
+
+    @property
+    def catalogue_path(self) -> Path:
+        return _resolve(self.theme_catalogue)
 
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]

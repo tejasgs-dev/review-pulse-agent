@@ -6,7 +6,8 @@ import re
 from collections.abc import Callable
 from datetime import date, timedelta
 
-from pulse.analysis.cluster import Assignment, AssignmentBatch, Discovery, ThemeDef
+from pulse.analysis.cluster import ThemeDef
+from pulse.analysis.engines.llm_cluster import Assignment, AssignmentBatch, Discovery
 from pulse.analysis.llm import Usage
 from pulse.models import CleanReview
 

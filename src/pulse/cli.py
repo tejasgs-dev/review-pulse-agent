@@ -72,6 +72,30 @@ ConfigOpt = Annotated[
 ]
 
 
+def _engine_option(value: str | None) -> str | None:
+    if value is not None and value not in ("local", "llm"):
+        raise typer.BadParameter("must be local or llm")
+    return value
+
+
+EngineOpt = Annotated[
+    str | None,
+    typer.Option("--engine", callback=_engine_option,
+                 help="local (default: free, offline ML and rules) or llm (Claude API, paid). "
+                      "Overrides analysis.engine."),
+]
+
+
+def _with_engine(cfg: PulseConfig, engine: str | None) -> PulseConfig:
+    if engine is None or engine == cfg.analysis.engine:
+        return cfg
+    if engine == "local" and cfg.analysis.local is None:
+        typer.secho("--engine local needs an analysis.local section in pulse.yaml",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(ExitCode.CONFIG_ERROR)
+    return cfg.model_copy(update={"analysis": cfg.analysis.model_copy(update={"engine": engine})})
+
+
 def _load(config: Path | None) -> PulseConfig:
     try:
         return load_config(config)
@@ -111,6 +135,7 @@ def run(
         bool, typer.Option("--dry-run", help="Run every stage, skip MCP calls.")
     ] = False,
     skip_ingest: Annotated[bool, typer.Option("--skip-ingest")] = False,
+    engine: EngineOpt = None,
     config: ConfigOpt = None,
 ) -> None:
     """Run the whole pipeline for one week: ingest, then stages 3–6, then publish.
@@ -118,7 +143,7 @@ def run(
     With --dry-run every stage runs and the pulse is written to runs/{week}/, but nothing is
     sent to Google Docs or Gmail.
     """
-    cfg = _load(config)
+    cfg = _with_engine(_load(config), engine)
     if weeks_back is not None:
         cfg = cfg.model_copy(update={"window": cfg.window.model_copy(
             update={"weeks_back": weeks_back})})
@@ -214,9 +239,9 @@ def _ingest_stage(cfg: PulseConfig, week: str, *, full: bool, sources: list[str]
 
 
 @app.command()
-def analyze(week: WeekOpt = None, config: ConfigOpt = None) -> None:
+def analyze(week: WeekOpt = None, engine: EngineOpt = None, config: ConfigOpt = None) -> None:
     """Stages 3–6 only (no publishing): scrub, cluster, compose, validate."""
-    _analysis_stages(_load(config), week)
+    _analysis_stages(_with_engine(_load(config), engine), week)
 
 
 def _analysis_stages(cfg: PulseConfig, week: str) -> None:
@@ -252,40 +277,56 @@ def _analysis_stages(cfg: PulseConfig, week: str) -> None:
                f"({hits})")
     typer.echo(f"  wrote {path}")
 
-    from pulse.analysis import llm as llm_mod
+    from pulse.analysis.catalogue import CatalogueError, load_catalogue
 
-    llm = llm_mod.build_llm(cfg.llm, log_dir=cfg.paths.runs_path / week / "llm")
-    cluster = _cluster_stage(cfg, week, (start, end), result.reviews, llm)
-    _compose_stage(cfg, week, cluster, result.reviews, llm)
+    llm = catalogue = None
+    if cfg.analysis.engine == "llm":
+        from pulse.analysis import llm as llm_mod
+
+        llm = llm_mod.build_llm(cfg.llm, log_dir=cfg.paths.runs_path / week / "llm")
+    else:
+        try:
+            catalogue = load_catalogue(cfg.analysis.catalogue_path)
+        except CatalogueError as e:
+            typer.secho(str(e), fg=typer.colors.RED, err=True)
+            raise typer.Exit(ExitCode.CONFIG_ERROR) from e
+    cluster = _cluster_stage(cfg, week, (start, end), result.reviews, llm, catalogue)
+    _compose_stage(cfg, week, cluster, result.reviews, llm, catalogue)
 
 
-def _cluster_stage(cfg: PulseConfig, week: str, window, reviews, llm):
+def _cluster_stage(cfg: PulseConfig, week: str, window, reviews, llm, catalogue):
     """Stage 4: theme clustering and ranking → runs/{week}/themes.json (§4.4)."""
     import time
 
-    from pulse.analysis import llm as llm_mod
-    from pulse.analysis.cluster import (
-        ClusterError,
-        manifest_section,
-        run_clustering,
-        write_themes,
-    )
+    from pulse.analysis.cluster import ClusterError, manifest_section, write_themes
+    from pulse.analysis.llm import LlmError
     from pulse.analysis.rank import GENERAL_PRAISE, OTHER, RankError
     from pulse.manifest import update_manifest
 
     runs = cfg.paths.runs_path
-    typer.echo(f"  Theme clustering with {cfg.llm.model} ({len(reviews)} reviews)…")
+    engine = cfg.analysis.engine
     started = time.monotonic()
     try:
-        result = run_clustering(llm, reviews, cfg, week=week, window=window)
-    except (llm_mod.LlmError, ClusterError, RankError) as e:
-        code = ExitCode.LLM_FAILED if isinstance(e, llm_mod.LlmError) else (
-            ExitCode.ANALYSIS_FAILED)
+        if engine == "llm":
+            from pulse.analysis.engines.llm_cluster import run_llm_clustering
+
+            typer.echo(f"  Theme clustering with {cfg.llm.model} ({len(reviews)} reviews)…")
+            result = run_llm_clustering(llm, reviews, cfg, week=week, window=window)
+        else:
+            from pulse.analysis.engines import local_cluster
+
+            typer.echo(f"  Theme clustering, local engine ({cfg.analysis.local.model}, "
+                       f"{len(reviews)} reviews)…")
+            embedder = local_cluster.build_embedder(cfg)
+            result = local_cluster.run_local_clustering(
+                reviews, cfg, week=week, window=window, embedder=embedder, catalogue=catalogue)
+    except (LlmError, ClusterError, RankError) as e:
+        code = ExitCode.LLM_FAILED if isinstance(e, LlmError) else ExitCode.ANALYSIS_FAILED
         update_manifest(runs, week, "cluster", {
-            "status": "failed", "error": str(e),
+            "status": "failed", "engine": engine, "error": str(e),
             "kind": getattr(e, "kind", type(e).__name__),
             "refusal_category": getattr(e, "category", None),
-            "usage": llm.usage.to_dict(),
+            **({"usage": llm.usage.to_dict()} if llm is not None else {}),
         })
         typer.secho(f"  ✗ {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code) from e
@@ -304,63 +345,79 @@ def _cluster_stage(cfg: PulseConfig, week: str, window, reviews, llm):
     b = result.buckets
     typer.echo(f"     general praise {b[GENERAL_PRAISE].volume_share:.1%} · "
                f"other {b[OTHER].volume_share:.1%}"
-               + (" · re-discovered once" if result.rediscovered else ""))
-    probe = result.quality["consistency"]
+               + (" · re-clustered once" if result.rediscovered else ""))
+    probe = result.quality.get("consistency", {})
     if probe.get("agreement") is not None:
         typer.echo(f"     consistency probe: {probe['agreement']:.0%} of {probe['sample']} agree")
+    stability = result.quality.get("stability", {})
+    if stability.get("median_ari") is not None:
+        typer.echo(f"     {len(result.themes)} themes · stability (median ARI vs 3 other seeds) "
+                   f"{stability['median_ari']:.2f}")
     for w in result.warnings:
         typer.secho(f"     ! {w['message']}", fg=typer.colors.YELLOW)
-    u = result.usage
-    typer.echo(f"     {u.calls} calls · {u.input_tokens:,} in / {u.output_tokens:,} out tokens "
-               f"(cache read {u.cache_read_tokens:,}) · ≈${u.estimated_usd:.2f} · "
-               f"{section['seconds']}s")
+    if engine == "llm":
+        u = result.usage
+        typer.echo(f"     {u.calls} calls · {u.input_tokens:,} in / {u.output_tokens:,} out "
+                   f"tokens (cache read {u.cache_read_tokens:,}) · ≈${u.estimated_usd:.2f} · "
+                   f"{section['seconds']}s")
+    else:
+        typer.echo(f"     no API calls · {section['seconds']}s")
     typer.echo(f"  wrote {path}")
     return result
 
 
-def _compose_stage(cfg: PulseConfig, week: str, cluster, reviews, llm) -> None:
+def _compose_stage(cfg: PulseConfig, week: str, cluster, reviews, llm, catalogue) -> None:
     """Stages 5–6: compose quotes, summaries and actions; validate; render (§4.5, §4.6, §7)."""
     import time
 
-    from pulse.analysis import llm as llm_mod
     from pulse.analysis.compose import (
-        QUOTE_PROMPT,
-        WRITE_PROMPT,
+        LLM_PROMPTS,
         ComposeError,
-        compose_pulse,
         write_compose_artifacts,
         write_failure,
     )
+    from pulse.analysis.llm import LlmError, Usage
     from pulse.manifest import update_manifest
 
     runs = cfg.paths.runs_path
-    before = llm_mod.Usage()
-    before.add(llm.usage)
-    typer.echo("  Composing the pulse (quotes, summaries, actions)…")
+    engine = cfg.analysis.engine
+    before = Usage()
+    if llm is not None:
+        before.add(llm.usage)
+    typer.echo("  Composing the pulse (quotes, summaries, actions)"
+               + (" by rules and templates…" if engine == "local" else "…"))
     started = time.monotonic()
     try:
-        result = compose_pulse(llm, cluster, reviews, cfg)
-    except (ComposeError, llm_mod.LlmError) as e:
+        if engine == "llm":
+            from pulse.analysis.engines.llm_compose import compose_pulse_llm
+
+            result = compose_pulse_llm(llm, cluster, reviews, cfg)
+        else:
+            from pulse.analysis.engines.rules_compose import compose_pulse_rules
+
+            result = compose_pulse_rules(cluster, reviews, cfg, catalogue)
+    except (ComposeError, LlmError) as e:
         attempts = getattr(e, "attempts", [])
         path = write_failure(runs, week, stage="compose", error=str(e), attempts=attempts)
         update_manifest(runs, week, "compose", {
-            "status": "failed", "error": str(e), "attempts": len(attempts),
+            "status": "failed", "engine": engine, "error": str(e), "attempts": len(attempts),
             "kind": getattr(e, "kind", type(e).__name__),
             "refusal_category": getattr(e, "category", None),
-            "usage": _usage_since(llm.usage, before),
+            **({"usage": _usage_since(llm.usage, before)} if llm is not None else {}),
         })
         typer.secho(f"  ✗ {e}", fg=typer.colors.RED, err=True)
         typer.secho(f"  nothing was published; see {path}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(ExitCode.LLM_FAILED if isinstance(e, llm_mod.LlmError)
+        raise typer.Exit(ExitCode.LLM_FAILED if isinstance(e, LlmError)
                          else ExitCode.VALIDATION_FAILED) from e
 
     paths = write_compose_artifacts(result, cfg, runs)
     seconds = round(time.monotonic() - started, 1)
     update_manifest(runs, week, "compose", {
-        "status": "ok", "attempts": len(result.attempts),
+        "status": "ok", "engine": engine, "attempts": len(result.attempts),
         "word_count": result.report.word_count, "max_words": cfg.analysis.max_words,
-        "prompt_versions": {"quote_pick": QUOTE_PROMPT, "write": WRITE_PROMPT},
-        "usage": _usage_since(llm.usage, before), "seconds": seconds,
+        **({"prompt_versions": LLM_PROMPTS, "usage": _usage_since(llm.usage, before)}
+           if llm is not None else {}),
+        "seconds": seconds,
     })
     (runs / week / "failure.json").unlink(missing_ok=True)  # a stale failure from earlier
     typer.echo(f"     passed every check on attempt {len(result.attempts)} · "
@@ -399,10 +456,26 @@ def doctor(config: ConfigOpt = None) -> None:
     """Check config, credentials, and MCP setup."""
     cfg = _load(config)
     checks: list[tuple[str, bool, str]] = [("config/pulse.yaml is valid", True, "")]
+    warnings: list[str] = []
 
-    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    checks.append(("ANTHROPIC_API_KEY is set", has_key,
-                   "set it in .env, or use an `ant auth login` profile"))
+    checks.append((f"analysis engine: {cfg.analysis.engine}", True, ""))
+    if cfg.analysis.engine == "llm":
+        has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        checks.append(("ANTHROPIC_API_KEY is set (LLM engine)", has_key,
+                       "set it in .env, or use an `ant auth login` profile"))
+    else:
+        from pulse.analysis.catalogue import CatalogueError, load_catalogue
+        from pulse.analysis.engines.local_cluster import model_is_cached
+
+        try:
+            load_catalogue(cfg.analysis.catalogue_path)
+            catalogue_ok, catalogue_hint = True, ""
+        except CatalogueError as e:
+            catalogue_ok, catalogue_hint = False, str(e).splitlines()[0]
+        checks.append(("theme catalogue is valid", catalogue_ok, catalogue_hint))
+        if not model_is_cached(cfg):
+            warnings.append("embedding model is not cached yet: the first `pulse analyze` "
+                            "downloads it (about 30 MB) into data/models/")
     checks.append(("PULSE_RECIPIENT is set", cfg.publish.recipient is not None,
                    "set one address in .env"))
     checks.append(("PULSE_DOCS_FOLDER_ID is set", cfg.publish.docs_folder_id is not None,
@@ -419,6 +492,8 @@ def doctor(config: ConfigOpt = None) -> None:
             "FAIL", fg=typer.colors.RED)
         typer.echo(f"[{mark}] {label}" + ("" if ok else f"  ({hint})"))
         failed += not ok
+    for w in warnings:
+        typer.echo(f"[{typer.style('warn', fg=typer.colors.YELLOW)}] {w}")
     typer.echo("Live checks (API call, MCP list_tools) arrive in Phase 5.")
     if failed:
         raise typer.Exit(ExitCode.DOCTOR_FAILED)

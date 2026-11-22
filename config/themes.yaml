@@ -1,0 +1,154 @@
+# Theme catalogue for the local engine (architecture §4.4 step 7, §4.5).
+#
+# Each clustered theme is matched to the entry whose `keywords` share the most of the theme's
+# top 6 keywords (at least 2). The entry gives the theme a stable ID and a readable label, and
+# its templates write the summary, action idea and signal for the pulse.
+#
+# Template placeholders (filled in by code, never typed as numbers here):
+#   {kw1} {kw2} {kw3}   the theme's top keywords this week (allowed everywhere)
+#   {count}             theme reviews in the whole review window (8–12 weeks), e.g. "245";
+#                       never call it "this week's"
+#   {recent_count}      theme reviews in the last 14 days
+#   {share}             share of all reviews, e.g. "18%"
+#   {negative_share}    share of the theme's reviews rated 1–2★, e.g. "91%"
+#   {trend}             "rising", "steady" or "easing" (last 14 days vs the window)
+# Summaries may only use {kw1}-{kw3}: the renderer already prints the share and the 1–2★ share
+# next to them, and the validator rejects statistics in summaries (edge case CMP-22).
+# Actions and signals may use the figures, so they change from week to week.
+# Keep templates short: the whole pulse must stay within 250 words.
+
+generic:
+  summary: "Reviewers often mention {kw1}, {kw2} and {kw3}"
+  summary_short: "Reviewers often mention {kw1} and {kw2}"
+  action: "Review the {count} reviews mentioning {kw1} ({trend}) with the owning team and fix the most common problem"
+  action_short: "Fix the most common {kw1} problem with the owning team"
+  signal: "fewer than {recent_count} reviews mentioning {kw1} in the next two weeks"
+
+themes:
+  - id: support
+    label: Customer support
+    keywords: [customer, support, customer support, care, customer care, service,
+               customer service, ticket, tickets, reply, chat, agent, agents, complaint,
+               complaints, response, call, calls, email, mail, executive, helpline, team]
+    summary: "Reviewers struggle to get a reply or a fix, often about {kw1} and {kw2}"
+    summary_short: "Reviewers struggle to get a reply or a fix"
+    action: "Audit the {recent_count} support complaints from the last two weeks and give each one an owner and a reply deadline"
+    action_short: "Give every open support case an owner and a reply deadline"
+    signal: "fewer than {recent_count} support complaints in the next two weeks"
+
+  - id: charges
+    label: Charges & brokerage
+    keywords: [charges, charge, charged, brokerage, brokerage charges, fees, fee, hidden,
+               hidden charges, deducted, deduction, amc, dp, gst, stt, high, rs, margin,
+               expensive, cost]
+    summary: "Reviewers find charges high or unclear, especially {kw1} and {kw2}"
+    summary_short: "Reviewers find charges high or unclear"
+    action: "Show a per-order charge breakdown before confirmation, starting with the {kw1} cases among the {count} charge reviews"
+    action_short: "Show a per-order charge breakdown before confirmation"
+    signal: "fewer than {recent_count} charge complaints in the next two weeks"
+
+  - id: performance_bugs
+    label: Bugs & app updates
+    keywords: [update, updates, updated, working, issue, issues, fix, bug, bugs, crash,
+               crashing, crashes, lag, lagging, slow, loading, glitch, glitches, hang,
+               hanging, error, errors, version, login, server, unable, freeze, problem]
+    summary: "Reviewers hit errors, crashes or broken screens, often around {kw1} and {kw2}"
+    summary_short: "Reviewers hit errors, crashes or broken screens"
+    action: "Triage the {recent_count} bug reports from the last two weeks and ship a fix for the most common one in the next release"
+    action_short: "Triage recent {kw1} bug reports and ship a fix"
+    signal: "fewer than {recent_count} bug reports in the next two weeks"
+
+  - id: feature_requests
+    label: Feature requests
+    keywords: [add, added, option, options, feature, features, please add, screen, ipad,
+               tablet, dark mode, widget, alert, alerts, filter, news, language, landscape,
+               full screen, watchlist, request, provide, want, display]
+    summary: "Reviewers ask for missing options, most often {kw1} and {kw2}"
+    summary_short: "Reviewers ask for missing options"
+    action: "Rank the {count} feature requests ({recent_count} recent) and scope the most asked-for one, {kw1}, for the roadmap"
+    action_short: "Scope the most requested feature, {kw1}, for the roadmap"
+    signal: "fewer repeat requests for {kw1}"
+
+  - id: trading_tools
+    label: Charts & trading tools
+    keywords: [chart, charts, indicator, indicators, candle, candles, trading view,
+               tradingview, option chain, f&o, futures, options, scalper, scalping, drawing,
+               timeframe, intraday, gtt, alert]
+    summary: "Traders report problems with {kw1} and {kw2}"
+    summary_short: "Traders report problems with charts and trading tools"
+    action: "Reproduce the top {kw1} problems from the {count} reviews with the trading team and fix the most reported one"
+    action_short: "Fix the most reported {kw1} problem"
+    signal: "fewer than {recent_count} chart and trading-tool complaints in the next two weeks"
+
+  - id: order_execution
+    label: Order execution & losses
+    keywords: [order, orders, execution, executed, stop loss, sl, loss, losses, lost,
+               price, exit, triggered, trigger, slippage, delay, delayed, pending, rejected,
+               target, market open, sell order, buy order]
+    summary: "Reviewers blame delayed or failed orders for losses, often around {kw1}"
+    summary_short: "Reviewers blame delayed or failed orders for losses"
+    action: "Check order logs behind the {recent_count} recent {kw1} complaints and publish the cause and the fix"
+    action_short: "Publish the cause and fix of recent {kw1} order failures"
+    signal: "fewer than {recent_count} order-failure complaints in the next two weeks"
+
+  - id: withdrawals
+    label: Money stuck & withdrawals
+    keywords: [withdraw, withdrawal, withdrawals, bank, bank account, funds, credited,
+               credit, refund, refunds, settlement, redeem, redemption, payout, balance,
+               money, days, stuck, received]
+    summary: "Reviewers wait too long for money to reach their bank, often {kw1}"
+    summary_short: "Reviewers wait too long for money to reach their bank"
+    action: "Show an expected credit date on every pending payout and clear the oldest of the {count} reported cases first"
+    action_short: "Show an expected credit date on every pending payout"
+    signal: "fewer than {recent_count} reviews about stuck money in the next two weeks"
+
+  - id: payments
+    label: Payments & adding money
+    keywords: [upi, payment, payments, add money, deposit, deposited, mandate, autopay,
+               recharge, wallet, transfer, failed, gateway, net banking, debit]
+    summary: "Reviewers have trouble adding money, often with {kw1} and {kw2}"
+    summary_short: "Reviewers have trouble adding money"
+    action: "Trace the failed {kw1} payments behind the {count} payment reviews and fix the most common failure"
+    action_short: "Fix the most common {kw1} payment failure"
+    signal: "fewer than {recent_count} payment complaints in the next two weeks"
+
+  - id: onboarding_kyc
+    label: Account opening & KYC
+    keywords: [kyc, verification, verify, verified, account opening, documents, document,
+               aadhaar, aadhar, pan, signature, esign, onboarding, rejected, ddpi, demat,
+               activation, nominee, re kyc]
+    summary: "Reviewers get stuck opening or verifying an account, often at {kw1}"
+    summary_short: "Reviewers get stuck opening or verifying an account"
+    action: "Replace generic {kw1} rejection messages with the exact fix needed, starting with the {count} reviewed cases"
+    action_short: "Replace generic {kw1} rejections with the exact fix needed"
+    signal: "fewer than {recent_count} KYC complaints in the next two weeks"
+
+  - id: stocks_portfolio
+    label: Stocks & portfolio
+    keywords: [stock, stocks, portfolio, market, buy, sell, selling, buying, shares, share,
+               holdings, investment, investing, invest, returns, profit, trading, trade]
+    summary: "Reviews about buying, selling and tracking stocks, often {kw1} and {kw2}"
+    summary_short: "Reviews about buying, selling and tracking stocks"
+    action: "Find the most common {kw1} complaint in the {count} portfolio reviews ({trend}) and fix or explain it in the app"
+    action_short: "Fix or explain the most common {kw1} complaint in the app"
+    signal: "fewer than {recent_count} portfolio complaints in the next two weeks"
+
+  - id: mutual_funds
+    label: IPO & mutual funds
+    keywords: [ipo, ipos, mutual, mutual fund, mutual funds, sip, sips, nav, allotment,
+               apply, applied, fund, funds, redemption, scheme, elss]
+    summary: "Reviewers raise problems with {kw1} and {kw2}"
+    summary_short: "Reviewers raise problems with IPOs and mutual funds"
+    action: "Walk through the {kw1} journey behind the {count} reviews and fix the step where most users fail"
+    action_short: "Fix the step where most {kw1} users fail"
+    signal: "fewer than {recent_count} IPO and fund complaints in the next two weeks"
+
+  - id: statements_tax
+    label: Statements & tax reports
+    keywords: [statement, statements, tax, report, reports, p&l, pnl, contract note,
+               capital gain, capital gains, ledger, download, invoice, itr]
+    summary: "Reviewers cannot find or trust their {kw1} and {kw2}"
+    summary_short: "Reviewers cannot find or trust their statements"
+    action: "Make the {kw1} report downloadable from one place and check it against the {count} reviews"
+    action_short: "Make the {kw1} report downloadable from one place"
+    signal: "fewer than {recent_count} statement complaints in the next two weeks"

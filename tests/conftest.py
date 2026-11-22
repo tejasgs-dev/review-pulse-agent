@@ -102,3 +102,15 @@ def _no_real_llm(request, monkeypatch):
         raise RuntimeError("tests must not call the real Claude API; patch build_llm")
 
     monkeypatch.setattr("pulse.analysis.llm.build_llm", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_embedder(request, monkeypatch):
+    """Offline tests never download the embedding model: they get a hashing stub instead.
+    `@pytest.mark.slow` tests use the real model."""
+    if request.node.get_closest_marker("slow"):
+        return
+    from tests.stub_embedder import HashingEmbedder
+
+    monkeypatch.setattr("pulse.analysis.engines.local_cluster.build_embedder",
+                        lambda cfg: HashingEmbedder())

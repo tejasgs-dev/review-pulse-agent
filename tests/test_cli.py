@@ -31,7 +31,7 @@ def test_run_dry_run_end_to_end(tmp_config, tmp_path, monkeypatch):
     _store_three_reviews(tmp_path)
     _fake_llm(monkeypatch)
     result = runner.invoke(app, ["run", "--week", "2026-W47", "--dry-run", "--skip-ingest",
-                                 "--config", str(path)])
+                                 "--engine", "llm", "--config", str(path)])
     assert result.exit_code == ExitCode.OK, result.output
     assert "Dry run: nothing was published." in result.output
     week = tmp_path / "runs" / "2026-W47"
@@ -53,7 +53,7 @@ def test_run_without_dry_run_stops_before_publishing(tmp_config, tmp_path, monke
     _store_three_reviews(tmp_path)
     _fake_llm(monkeypatch)
     result = runner.invoke(app, ["run", "--week", "2026-W47", "--skip-ingest",
-                                 "--config", str(path)])
+                                 "--engine", "llm", "--config", str(path)])
     assert result.exit_code == ExitCode.NOT_IMPLEMENTED
     assert (tmp_path / "runs" / "2026-W47" / "pulse.md").exists()
 
@@ -74,7 +74,7 @@ def test_run_writes_failure_json_when_validation_keeps_failing(tmp_config, tmp_p
         actions=[ActionDraft(theme_id="a_theme", action="Show refund status", signal="Fewer"),
                  ActionDraft(theme_id="b_theme", action="Show refund status", signal="Fewer")])
     result = runner.invoke(app, ["run", "--week", "2026-W47", "--dry-run", "--skip-ingest",
-                                 "--config", str(path)])
+                                 "--engine", "llm", "--config", str(path)])
     assert result.exit_code == ExitCode.VALIDATION_FAILED
     week = tmp_path / "runs" / "2026-W47"
     failure = json.loads((week / "failure.json").read_text(encoding="utf-8"))
@@ -124,7 +124,7 @@ def _store_three_reviews(tmp_path):
 def _fake_llm(monkeypatch):
     """One theme per review (r0001 -> a, r0002 -> b, r0003 -> c)."""
     from pulse.analysis import llm as llm_mod
-    from pulse.analysis.cluster import Discovery
+    from pulse.analysis.engines.llm_cluster import Discovery
     from tests.fake_llm import FakeLlm, theme
 
     ids = ["r0001", "r0002", "r0003"]
@@ -143,7 +143,8 @@ def test_analyze_scrubs_clusters_and_writes_themes(tmp_config, tmp_path, monkeyp
     _store_three_reviews(tmp_path)
     fake = _fake_llm(monkeypatch)
 
-    result = runner.invoke(app, ["analyze", "--week", "2026-W47", "--config", str(path)])
+    result = runner.invoke(app, ["analyze", "--week", "2026-W47", "--engine", "llm",
+                                 "--config", str(path)])
     assert result.exit_code == ExitCode.OK, result.output
     assert "3 reviews had identifiers removed (phone 3)" in result.output
     assert "general praise 0.0%" in result.output
@@ -171,7 +172,8 @@ def test_analyze_reports_llm_failure(tmp_config, tmp_path, monkeypatch):
     path = tmp_config(lambda d: d["analysis"].__setitem__("min_reviews", 2))
     _store_three_reviews(tmp_path)
     monkeypatch.setattr(llm_mod, "build_llm", lambda cfg, log_dir=None: Refusing())
-    result = runner.invoke(app, ["analyze", "--week", "2026-W47", "--config", str(path)])
+    result = runner.invoke(app, ["analyze", "--week", "2026-W47", "--engine", "llm",
+                                 "--config", str(path)])
     assert result.exit_code == ExitCode.LLM_FAILED
     manifest = json.loads((tmp_path / "runs" / "2026-W47" / "manifest.json").read_text("utf-8"))
     assert manifest["cluster"]["status"] == "failed"
@@ -185,7 +187,8 @@ def test_analyze_scrubs_window_and_writes_clean_reviews(tmp_config, tmp_path, mo
     _store_three_reviews(tmp_path)
     _fake_llm(monkeypatch)
 
-    result = runner.invoke(app, ["analyze", "--week", "2026-W47", "--config", str(path)])
+    result = runner.invoke(app, ["analyze", "--week", "2026-W47", "--engine", "llm",
+                                 "--config", str(path)])
     assert result.exit_code == ExitCode.OK
     assert "3 reviews had identifiers removed (phone 3)" in result.output
     out = tmp_path / "runs" / "2026-W47" / "clean_reviews.jsonl"

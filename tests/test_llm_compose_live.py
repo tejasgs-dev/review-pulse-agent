@@ -10,7 +10,8 @@ from datetime import date
 import pytest
 
 from pulse.analysis.cluster import ThemeDef
-from pulse.analysis.compose import ThemeContext, build_quotes, pick_quotes
+from pulse.analysis.compose import ThemeContext, build_quotes
+from pulse.analysis.engines.llm_compose import pick_quotes
 from pulse.analysis.llm import build_llm
 from pulse.analysis.rank import ThemeStats
 from pulse.models import CleanReview

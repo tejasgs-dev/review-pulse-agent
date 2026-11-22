@@ -177,16 +177,16 @@ This document lists the inputs, states, and failures the system must handle on p
 
 | ID | Scenario | Expected behavior | Covered by |
 |---|---|---|---|
-| LOC-01 | The embedding model is not cached and there is no network | Stop the analysis stage with a clear error naming `analysis.local.model`; nothing is published. CI caches `data/models/`. | P3 (planned) |
-| LOC-02 | The model on the hub changes | Pin `analysis.local.model_revision`; record the revision in the manifest. | P3 (planned) |
-| LOC-03 | A fresh run gives different themes on another CPU | Sorted input, fixed seeds, single-threaded clustering. Same OS: byte-identical; across OSes: same labels and top 3 (exit criterion). | P3 (planned) |
-| LOC-04 | No k from 5 to 3 passes the stability and 3% rules (a quiet week) | Stop with `RankError` and a clear message; nothing is published. | P3 (planned) |
-| LOC-05 | A "theme" is really generic praise or venting ("worst app ever") | The praise rule runs before clustering; micro-clusters dominated by praise or vague words are routed to `general_praise` / `other`. Word lists are config. | P3 (planned) |
-| LOC-06 | Romanized Hindi that passed the English filter forms a cluster | Hinglish words are on the vague list, so the micro-cluster goes to `other`. | P3 (planned) |
-| LOC-07 | A theme's keywords match no catalogue entry | Label from the top two keywords (4 words or fewer); the unmatched label is logged so `config/themes.yaml` can grow. | P3 (planned) |
-| LOC-08 | Two themes match the same catalogue entry | Merge them into one theme. | P3 (planned) |
-| LOC-09 | Keyword labels contain a redaction token or a stop word | Redaction tokens and stop words are removed before c-TF-IDF. | P3 (planned) |
-| LOC-10 | A template produces more than 250 words, or a number | Short template forms are used as a fallback; templates are checked at config load for digits. The validator's `no_stats_in_text` also applies. | P4 (planned) |
+| LOC-01 | The embedding model is not cached and there is no network | Stop the analysis stage with a clear error naming `analysis.local.model`; nothing is published. CI caches `data/models/`. | P3/P4 built (`tests/test_local_cluster.py`, `tests/test_rules_compose.py`) |
+| LOC-02 | The model on the hub changes | Pin `analysis.local.model_revision`; record the revision in the manifest. | P3/P4 built (`tests/test_local_cluster.py`, `tests/test_rules_compose.py`) |
+| LOC-03 | A fresh run gives different themes on another CPU | Sorted input, fixed seeds, single-threaded clustering. Same OS: byte-identical; across OSes: same labels and top 3 (exit criterion). | P3/P4 built (`tests/test_local_cluster.py`, `tests/test_rules_compose.py`) |
+| LOC-04 | No k from 5 to 3 passes the stability and 3% rules (a quiet week) | Stop with `RankError` and a clear message; nothing is published. | P3/P4 built (`tests/test_local_cluster.py`, `tests/test_rules_compose.py`) |
+| LOC-05 | A "theme" is really generic praise or venting ("worst app ever") | The praise rule runs before clustering; micro-clusters dominated by praise or vague words are routed to `general_praise` / `other`. Word lists are config. | P3/P4 built (`tests/test_local_cluster.py`, `tests/test_rules_compose.py`) |
+| LOC-06 | Romanized Hindi that passed the English filter forms a cluster | Hinglish words are on the vague list, so the micro-cluster goes to `other`. | P3/P4 built (`tests/test_local_cluster.py`, `tests/test_rules_compose.py`) |
+| LOC-07 | A theme's keywords match no catalogue entry | Label from the top two keywords (4 words or fewer); the unmatched label is logged so `config/themes.yaml` can grow. | P3/P4 built (`tests/test_local_cluster.py`, `tests/test_rules_compose.py`) |
+| LOC-08 | Two themes match the same catalogue entry | Merge them into one theme. | P3/P4 built (`tests/test_local_cluster.py`, `tests/test_rules_compose.py`) |
+| LOC-09 | Keyword labels contain a redaction token or a stop word | Redaction tokens and stop words are removed before c-TF-IDF. | P3/P4 built (`tests/test_local_cluster.py`, `tests/test_rules_compose.py`) |
+| LOC-10 | A template produces more than 250 words, or a number | Short template forms are used as a fallback; templates are checked at config load for digits. The validator's `no_stats_in_text` also applies. | P3/P4 built (`tests/test_local_cluster.py`, `tests/test_rules_compose.py`) |
 
 ### 4.4 Ranking
 
@@ -212,7 +212,7 @@ This document lists the inputs, states, and failures the system must handle on p
 | CMP-02 | A theme has 1–4 candidates (fewer than the 5–8 target) | Continue with what exists. | P4: continues with what exists (test) |
 | CMP-03 | All candidates have the same rating | "Mixed ratings" is a preference, not a requirement. Do not fail. | §4.5 |
 | CMP-04 | A candidate contains profanity or abuse | Exclude it from candidates. The audience is internal and professional. | P4: profanity list in `compose.py` |
-| CMP-05 | A candidate mentions a person by name | Skip any candidate that probably names a person (PII-11): the name filter in the default engine, the quote-pick prompt in the LLM engine. The validator cannot check this, so a human reviews the first pulses. | P4 name filter (planned) / prompt rule (built) |
+| CMP-05 | A candidate mentions a person by name | Skip any candidate that probably names a person (PII-11): the name filter in the default engine, the quote-pick prompt in the LLM engine. The validator cannot check this, so a human reviews the first pulses. | P4 name filter / prompt rule (both built) |
 
 ### 5.2 Spans and quote fidelity
 

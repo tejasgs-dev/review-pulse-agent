@@ -24,7 +24,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
-import anthropic
 from pydantic import BaseModel, ValidationError
 
 from pulse.config import Effort, LlmConfig
@@ -106,12 +105,13 @@ class LlmClient:
         self.cfg = cfg
         self.log_dir = log_dir
         self.usage = Usage()
-        self._client = client if client is not None else anthropic.Anthropic()
+        self._client = client if client is not None else _anthropic().Anthropic()
         self._lock = threading.Lock()
         self._seq = itertools.count(1)
 
     def parse(self, *, name: str, system: str, prefix: str | None, user: str,
               schema: type[T], effort: Effort, max_tokens: int = DEFAULT_MAX_TOKENS) -> T:
+        anthropic = _anthropic()
         content: list[dict[str, Any]] = []
         if prefix:
             # Stable across the calls of one stage (e.g. theme definitions in Pass B).
@@ -200,6 +200,16 @@ class LlmClient:
                 "output": parsed,
             },
         })
+
+
+def _anthropic():
+    """Import the SDK only when the LLM engine is used: it is an optional extra (`[llm]`)."""
+    try:
+        import anthropic
+    except ImportError as e:
+        raise LlmError("the LLM engine needs the optional `anthropic` package: "
+                       'pip install -e ".[llm]"', kind="missing_dependency") from e
+    return anthropic
 
 
 def _usage_of(message: Any, seconds: float) -> Usage:

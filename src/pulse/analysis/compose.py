@@ -1,16 +1,16 @@
-"""Pulse composer (architecture §4.5, plan Phase 4): quotes, summaries, actions, retries.
+"""Pulse composer: what both engines share (architecture §4.5, plan Phase 4).
 
-1. **Candidate selection (code).** Up to 8 reviews per top theme: the right length, no
-   profanity, no redaction tokens, recent first, ratings mixed. Limits relax in steps if a
-   theme has nothing eligible (edge cases CMP-01/02/04/16, PII-22).
-2. **Quote pick (model).** Each candidate is split into numbered sentences; the model
-   returns a review ID and a sentence range per theme. Code slices `canonical_text`, so a
-   quote is always verbatim and always starts and ends on a sentence boundary. The model
-   never writes quote text and never counts characters (CMP-10, CMP-12).
-3. **Writing (model).** One summary per theme and one action idea per theme, words only;
-   every number in the pulse is inserted by the renderer (CMP-22).
-4. **Validation (code, `validate.py`).** On failure, only the part that failed is asked for
-   again, with the error list (at most 2 retries, each validated in full: VAL-08).
+- **Candidate selection (code).** Up to 8 reviews per top theme: the right length, no
+  profanity, no redaction tokens, recent first, ratings mixed. Limits relax in steps if a
+  theme has nothing eligible (edge cases CMP-01/02/04/16, PII-22).
+- **Quotes by sentence range.** Each candidate is split into whole sentences; an engine picks
+  a review and a first/last sentence, and `build_quotes` slices `canonical_text`, so a quote
+  is always verbatim and starts and ends on a sentence boundary (CMP-10, CMP-12).
+- **Assembly and artifacts.** Every number in the pulse is inserted by the renderer from the
+  computed stats (CMP-22); `validate.py` checks the result.
+
+The engines are `engines/rules_compose.py` (default: rules and templates) and
+`engines/llm_compose.py` (optional: Claude).
 """
 
 from __future__ import annotations
@@ -25,23 +25,18 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from pulse.analysis.cluster import ClusterResult, ThemeDef, load_prompt
-from pulse.analysis.llm import StructuredLlm
+from pulse.analysis.cluster import ClusterResult, ThemeDef
 from pulse.analysis.rank import GENERAL_PRAISE, ThemeStats
-from pulse.analysis.validate import ValidationReport, validate_pulse
+from pulse.analysis.validate import ValidationReport
 from pulse.config import PulseConfig
 from pulse.fileio import atomic_write, write_json
 from pulse.models import ActionIdea, CleanReview, Pulse, Quote, Theme
 from pulse.render.markdown import email_subject, render_body, render_doc, render_email
 from pulse.textutil import word_count
 
-QUOTE_PROMPT = "quote_pick_v1"
-WRITE_PROMPT = "write_v1"
+LLM_PROMPTS = {"quote_pick": "quote_pick_v1", "write": "write_v1"}
 MAX_RETRIES = 2
 MAX_CANDIDATES = 8
-EVIDENCE_PER_THEME = 12
-EVIDENCE_MAX_WORDS = 50
-SUMMARY_WORDS, ACTION_WORDS, SIGNAL_WORDS = 14, 22, 12
 
 _REDACTION = re.compile(r"\[(?:email|phone|id|number|link|handle)\]")
 # Clear profanity only (CMP-04); the audience is internal and professional.
@@ -175,6 +170,7 @@ class ComposeResult:
     report: ValidationReport
     attempts: list[dict[str, Any]]
     usage: dict[str, Any] = field(default_factory=dict)
+    engine: str = "local"
 
 
 def build_contexts(cluster: ClusterResult, reviews: Sequence[CleanReview],
@@ -194,43 +190,16 @@ def build_contexts(cluster: ClusterResult, reviews: Sequence[CleanReview],
     return contexts
 
 
-def _trend(s: ThemeStats) -> str:
+def trend_word(s: ThemeStats) -> str:
+    """'rising', 'steady' or 'easing': the last 14 days compared with the window."""
     if s.recency_weight >= 1.2:
-        return "rising in the last two weeks"
+        return "rising"
     if s.recency_weight <= 0.8:
-        return "quieter in the last two weeks"
+        return "easing"
     return "steady"
 
 
-# ---------------------------------------------------------------------------- quote pick
-
-
-def _candidate_block(ctx: ThemeContext) -> str:
-    lines = [f"## Theme `{ctx.id}`: {ctx.definition.label}", ctx.definition.description, ""]
-    for r in ctx.candidates:
-        lines.append(f"Candidate {r.id} ({r.rating}★, {r.review_date.isoformat()}):")
-        for i, (s, e) in enumerate(sentence_spans(r.canonical_text), start=1):
-            lines.append(f"  [{i}] {' '.join(r.canonical_text[s:e].split())}")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def pick_quotes(llm: StructuredLlm, contexts: Sequence[ThemeContext], cfg: PulseConfig, *,
-                errors: Sequence[str] = (), previous: QuotePicks | None = None,
-                attempt: int = 0) -> QuotePicks:
-    a = cfg.analysis
-    system = load_prompt(QUOTE_PROMPT, product=cfg.product.name,
-                         quote_min_words=a.quote_min_words, quote_max_words=a.quote_max_words)
-    prefix = "\n".join(_candidate_block(c) for c in contexts)
-    user = f"Choose one quote for each of the {len(contexts)} themes above."
-    if errors:
-        user += ("\n\nYour previous picks were:\n" + (previous.model_dump_json() if previous
-                                                         else "(none)")
-                 + "\n\nThey had these problems; fix all of them:\n"
-                 + "\n".join(f"- {e}" for e in errors))
-    return llm.parse(name="quote_pick" + (f"_retry{attempt}" if attempt else ""),
-                     system=system, prefix=prefix, user=user, schema=QuotePicks,
-                     effort=cfg.llm.effort.compose)
+# ---------------------------------------------------------------------------- quotes
 
 
 def build_quotes(picks: QuotePicks, contexts: Sequence[ThemeContext]) -> tuple[
@@ -266,57 +235,13 @@ def build_quotes(picks: QuotePicks, contexts: Sequence[ThemeContext]) -> tuple[
     return quotes, errors
 
 
-# ---------------------------------------------------------------------------- writing
-
-
-def _evidence(ctx: ThemeContext) -> str:
-    lines = []
-    for r in ctx.members[:EVIDENCE_PER_THEME]:
-        words = r.canonical_text.split()
-        text = " ".join(words[:EVIDENCE_MAX_WORDS]) + (" …" if len(words) > EVIDENCE_MAX_WORDS
-                                                       else "")
-        lines.append(f"- ({r.rating}★) {text}")
-    return "\n".join(lines)
+# ---------------------------------------------------------------------------- budget
 
 
 def word_budget(pulse_without_text: Pulse, max_words: int) -> int:
     """Words left for summaries, actions and signals once headings, labels, stats and
     quotes are counted."""
     return max_words - word_count(render_body(pulse_without_text))
-
-
-def write_pulse(llm: StructuredLlm, contexts: Sequence[ThemeContext], quotes: Sequence[Quote],
-                budget: int, cfg: PulseConfig, *, errors: Sequence[str] = (),
-                previous: PulseWriting | None = None, attempt: int = 0) -> PulseWriting:
-    a = cfg.analysis
-    system = load_prompt(WRITE_PROMPT, product=cfg.product.name, top_themes=a.top_themes,
-                         max_words=a.max_words, summary_words=SUMMARY_WORDS,
-                         action_words=ACTION_WORDS, signal_words=SIGNAL_WORDS)
-    quote_by_theme = {q.theme_id: q for q in quotes}
-    parts = []
-    for rank, c in enumerate(contexts, start=1):
-        s = c.stats
-        q = quote_by_theme.get(c.id)
-        parts.append("\n".join([
-            f"## {rank}. `{c.id}`: {c.definition.label}",
-            f"Definition: {c.definition.description} Includes: {c.definition.include}",
-            f"Context (do not repeat these numbers): {s.count} reviews, "
-            f"{s.volume_share:.0%} of all reviews; {s.negative_share:.0%} rated 1–2★; "
-            f"{_trend(s)}.",
-            f"Quote shown: “{' '.join(q.text.split())}”" if q else "Quote shown: (none)",
-            "Recent reviews:",
-            _evidence(c),
-        ]))
-    user = ("\n\n".join(parts)
-            + f"\n\nYou have about {budget} words in total for the {len(contexts)} summaries, "
-            "actions and signals.")
-    if errors:
-        user += ("\n\nYour previous answer was:\n" + (previous.model_dump_json() if previous
-                                                       else "(none)")
-                 + "\n\nIt had these problems; fix all of them:\n"
-                 + "\n".join(f"- {e}" for e in errors))
-    return llm.parse(name="write" + (f"_retry{attempt}" if attempt else ""), system=system,
-                     prefix=None, user=user, schema=PulseWriting, effort=cfg.llm.effort.compose)
 
 
 # ---------------------------------------------------------------------------- assembly
@@ -347,53 +272,6 @@ def assemble(cluster: ClusterResult, contexts: Sequence[ThemeContext],
                  clustered_theme_count=len(cluster.themes))
 
 
-def compose_pulse(llm: StructuredLlm, cluster: ClusterResult, reviews: Sequence[CleanReview],
-                  cfg: PulseConfig) -> ComposeResult:
-    """Compose and validate. Raises ComposeError (with every attempt's issues) on failure."""
-    contexts = build_contexts(cluster, reviews, cfg)
-    by_id = {r.id: r for r in reviews}
-    assignments = {rid: x.theme_id for rid, x in cluster.assignments.items()}
-
-    picks = writing = None
-    quotes: list[Quote] = []
-    quote_errors: list[str] = []
-    writing_errors: list[str] = []
-    retry_quotes, retry_writing = True, True
-    attempts: list[dict[str, Any]] = []
-    for attempt in range(MAX_RETRIES + 1):
-        if retry_quotes:
-            picks = pick_quotes(llm, contexts, cfg, errors=quote_errors, previous=picks,
-                                attempt=attempt)
-            quotes, pick_errors = build_quotes(picks, contexts)
-        else:
-            pick_errors = []
-        if retry_writing:
-            empty = PulseWriting(summaries=[], actions=[
-                ActionDraft(theme_id=c.id, action="", signal="") for c in contexts])
-            skeleton = assemble(cluster, contexts, reviews, quotes, empty)
-            budget = word_budget(skeleton, cfg.analysis.max_words)
-            writing = write_pulse(llm, contexts, quotes, budget, cfg, errors=writing_errors,
-                                  previous=writing, attempt=attempt)
-        pulse = assemble(cluster, contexts, reviews, quotes, writing)
-        report = validate_pulse(pulse, reviews=by_id, assignments=assignments, cfg=cfg)
-        for e in pick_errors:
-            report.add("quote_count", e, "quotes")
-        attempts.append({"attempt": attempt + 1,
-                         "redid": [p for p, on in (("quotes", retry_quotes),
-                                                   ("writing", retry_writing)) if on],
-                         **report.to_dict()})
-        if report.ok:
-            return ComposeResult(pulse=pulse, report=report, attempts=attempts)
-        quote_errors = report.for_area("quotes")
-        writing_errors = report.for_area("writing")
-        retry_quotes, retry_writing = bool(quote_errors), bool(writing_errors)
-        if not (retry_quotes or retry_writing):
-            break  # only structure issues: the composer cannot fix them
-    last = attempts[-1]["issues"]
-    raise ComposeError(f"the pulse failed validation after {len(attempts)} attempts: "
-                       + "; ".join(i["message"] for i in last), attempts=attempts)
-
-
 # ---------------------------------------------------------------------------- artifacts
 
 
@@ -415,7 +293,8 @@ def write_compose_artifacts(result: ComposeResult, cfg: PulseConfig, runs_dir: P
              "validation": week_dir / "validation.json"}
     write_json(paths["pulse_json"], {
         **_jsonable(pulse),
-        "prompt_versions": {"quote_pick": QUOTE_PROMPT, "write": WRITE_PROMPT},
+        "engine": result.engine,
+        **({"prompt_versions": LLM_PROMPTS} if result.engine == "llm" else {}),
         "email": {"subject": email_subject(cfg.product.name, pulse.week),
                   "body": render_email(pulse, product=cfg.product.name,
                                        min_words=cfg.ingest.min_words)},

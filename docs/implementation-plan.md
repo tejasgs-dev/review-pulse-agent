@@ -229,25 +229,27 @@ The catalogue starts from the 8 seed themes plus what W46 showed (order executio
 
 ### Tasks
 - [x] *(LLM engine, built first; kept as `--engine llm`)* `analysis/llm.py`, `analysis/prompts/`, two-pass clustering, consistency probe, offline tests with a fake model. **Superseded as the default** by the local engine below.
-- [ ] Dependencies: add `scikit-learn` and `model2vec` (pinned) to the core dependencies; move `anthropic` to an optional extra `[llm]`. `pulse doctor` reports the active engine and checks only what it needs.
-- [ ] Config: `analysis.engine` (default `local`); `analysis.local.{model, model_revision, micro_clusters: 12, n_init: 50, seed: 42, min_stability: 0.75, other_cosine: 0.40, secondary_margin: 0.05, praise_words, specific_words, vague_words}`; `config/themes.yaml` (theme catalogue).
-- [ ] Restructure: move the LLM clustering into `analysis/engines/llm_cluster.py` (no behavior change). Put the shared `ClusterResult`, `themes.json` writer and manifest section in `analysis/cluster.py`, and select the engine in one place.
-- [ ] `analysis/engines/local_cluster.py`: L1–L8. Every step deterministic: sorted input, fixed seeds, `threadpoolctl` limiting BLAS/OpenMP to 1 thread during clustering, ties broken by ID.
-- [ ] Model cache in `data/models/`, offline-safe. A missing model with no network fails clearly and names the config key.
-- [ ] CLI: `--engine local|llm` on `analyze` and `run`.
-- [ ] CI: cache `data/models/` (`actions/cache`, keyed by model revision); keep `OMP_NUM_THREADS=1`.
-- [ ] Tests (offline, no network: a tiny fixture model or a stub embedding function):
-  - [ ] the praise rule: 4–5★ with a praise word and no specific word; "good app but please add X" is not praise;
-  - [ ] micro-cluster routing: a praise cluster, a vague cluster, a loose cluster;
-  - [ ] choosing k: picks the largest stable k; falls back to 4 or 3; stops below 3;
-  - [ ] the per-review `other` threshold and secondary margin;
-  - [ ] labelling: catalogue match, fallback label from keywords, labels of 4 words or fewer, merge of two clusters with the same catalogue entry;
-  - [ ] determinism: two runs on the same input give an identical `themes.json` apart from timestamps;
-  - [ ] the `--engine llm` path still passes its existing offline tests.
-- [ ] Keep `rank.py` and its tests unchanged.
+- [x] Dependencies: add `scikit-learn` and `model2vec` (pinned) to the core dependencies; move `anthropic` to an optional extra `[llm]`. `pulse doctor` reports the active engine and checks only what it needs.
+- [x] Config: `analysis.engine` (default `local`); `analysis.local.{model, model_revision, micro_clusters: 12, n_init: 50, seed: 42, min_stability: 0.75, other_cosine: 0.40, secondary_margin: 0.05, praise_words, specific_words, vague_words}`; `config/themes.yaml` (theme catalogue).
+- [x] Restructure: move the LLM clustering into `analysis/engines/llm_cluster.py` (no behavior change). Put the shared `ClusterResult`, `themes.json` writer and manifest section in `analysis/cluster.py`, and select the engine in one place.
+- [x] `analysis/engines/local_cluster.py`: L1–L8. Every step deterministic: sorted input, fixed seeds, `threadpoolctl` limiting BLAS/OpenMP to 1 thread during clustering, ties broken by ID.
+- [x] Model cache in `data/models/`, offline-safe. A missing model with no network fails clearly and names the config key.
+- [x] CLI: `--engine local|llm` on `analyze` and `run`.
+- [x] CI: `OMP_NUM_THREADS=1`, installs `.[dev,llm]`. No model cache is needed: offline tests use a hashing stub embedder (an autouse fixture), so CI never downloads the model; `tests/test_local_live.py` (`-m slow`, free) uses the real one.
+- [x] Tests (offline, no network: a stub embedding function; `tests/test_local_cluster.py`, `tests/test_catalogue.py`):
+  - [x] the praise rule: 4–5★ with a praise word and no specific word; "good app but please add X" is not praise;
+  - [x] micro-cluster routing: a praise cluster, a vague cluster, a loose cluster;
+  - [x] choosing k: picks the largest stable k; falls back to 4 or 3; stops below 3;
+  - [x] the per-review `other` threshold and secondary margin;
+  - [x] labelling: catalogue match, fallback label from keywords, labels of 4 words or fewer, merge of two clusters with the same catalogue entry;
+  - [x] determinism: two runs on the same input give an identical `themes.json` apart from timestamps;
+  - [x] the `--engine llm` path still passes its existing offline tests.
+- [x] Keep `rank.py` and its tests unchanged.
 
 ### Deliverables
 - `themes.json` for 2026-W46 from the local engine, with labels, shares, scores and assignments, and no API call.
+
+*Status (2026-11-22): done. On W46: 5 themes (Customer support 16%, Stocks & portfolio 14%, Bugs & app updates 13%, Feature requests 12%, Charges & brokerage 9%), general praise 24%, `other` 12%, stability median ARI 0.83, all 1,348 reviews assigned, about 14 s including the model load, and no API call. Two runs give byte-identical `themes.json`. Still open: the human spot check of 20 assignments, and the timing on GitHub Actions.*
 
 ### Exit criteria
 - 5 or fewer themes on real data; 100% of reviews assigned; `other` at 25% or less.
@@ -295,17 +297,17 @@ This is a heuristic. The gap stays recorded, and humans still read the first pul
 
 The quote is the window of 1–2 consecutive whole sentences (from `sentence_spans`) with the most theme keywords, within 8–35 words; failing that, the whole review if it is within 60 words. Code slices `canonical_text`, so quotes stay verbatim and on sentence boundaries. The three quotes come from three different reviews.
 
-**Summaries, actions and signals (templates).** Each catalogue entry in `config/themes.yaml` has three short templates with no numbers in them:
-- `summary`: "Reviewers report {kw1} and {kw2} problems, often after an update"
-- `action`: "Triage the most reported {kw1} bugs from the last two weeks with the owning team and ship a fix"
-- `signal`: "fewer reviews mentioning {kw1}"
+**Summaries, actions and signals (templates).** Each catalogue entry in `config/themes.yaml` has short templates (plus short forms for the word-count fallback):
+- `summary`: "Reviewers hit errors, crashes or broken screens, often around {kw1} and {kw2}"
+- `action`: "Triage the {recent_count} bug reports from the last two weeks and ship a fix for the most common one in the next release"
+- `signal`: "fewer than {recent_count} bug reports in the next two weeks"
 
-Placeholders `{kw1}`–`{kw3}` are filled with the theme's top keywords. A theme with no catalogue match uses generic templates:
-- summary: "Reviewers mention {kw1}, {kw2} and {kw3}"
-- action: "Review the top {kw1} complaints with the owning team and fix the most common one"
-- signal: "fewer reviews mentioning {kw1}"
+*(Revised 2026-11-22, project owner: actions and signals carry **that week's figures and top keywords**, so they don't read identically every week.)* Placeholders are filled by code: `{kw1}`–`{kw3}` with the theme's top keywords, and `{count}`, `{recent_count}`, `{share}`, `{negative_share}`, `{trend}` with the computed stats. Summaries may use keywords only, since the renderer already prints the shares next to them (CMP-22); templates never contain typed digits, so every figure comes from the stats. A theme with no catalogue match uses generic templates:
+- summary: "Reviewers often mention {kw1}, {kw2} and {kw3}"
+- action: "Review the {count} reviews mentioning {kw1} ({trend}) with the owning team and fix the most common problem"
+- signal: "fewer than {recent_count} reviews mentioning {kw1} in the next two weeks"
 
-Numbers stay in the renderer (CMP-22), and the validator's `no_stats_in_text` check also applies to templates.
+Figures in actions and signals come from the same stats the renderer uses, so they always agree with the theme line; the validator's `no_stats_in_text` check still applies to summaries.
 
 **Validation and fallbacks.** The same `validate.py`. Because the rules are deterministic, a retry means taking the next option, not asking again:
 - a quote problem → the next-best candidate for that theme;
@@ -318,19 +320,21 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 - [x] `analysis/validate.py`: every check in §4.6 (unchanged; applies to both engines).
 - [x] `render/markdown.py`, `pulse.json`, `pulse.md`, `validation.json`, the source line with the general-praise share, the golden file (unchanged).
 - [x] `pulse run --dry-run`, `--skip-ingest`, exit code 10, `failure.json` (unchanged).
-- [ ] Move the LLM composer to `analysis/engines/llm_compose.py`; keep candidate selection and `sentence_spans` shared.
-- [ ] `analysis/engines/rules_compose.py`: name filter, quote scoring and windowing, template filling, fallback rounds.
-- [ ] `config/themes.yaml`: a `summary`, `action`, `signal` and short forms for each catalogue entry, plus the generic templates; a schema check at config load (placeholders limited to `{kw1}`–`{kw3}`, no digits).
-- [ ] Tests:
-  - [ ] name filter: "Rahul from support was rude", "I am Priya Sharma", "Mr Verma", "agent Neha" are skipped; "UPI", "IPO", "Nifty", "iPad", "Monday" are not;
-  - [ ] quote scoring: deterministic choice, the keyword window, 1–2★ preference, three distinct reviews;
-  - [ ] templates: placeholders filled, no numbers, generic fallback for an unmatched theme;
-  - [ ] fallbacks: the next candidate on a quote failure; short templates on word-count overflow; `failure.json` after 2 rounds;
-  - [ ] end-to-end `pulse run --dry-run --skip-ingest` with the local engine on fixture reviews, using a stub embedding function in CI so no model download is needed;
-  - [ ] the existing validator contract tests and golden file keep passing unchanged.
+- [x] Move the LLM composer to `analysis/engines/llm_compose.py`; keep candidate selection and `sentence_spans` shared.
+- [x] `analysis/engines/rules_compose.py`: name filter, quote scoring and windowing, template filling, fallback rounds.
+- [x] `config/themes.yaml`: a `summary`, `action`, `signal` and short forms for each catalogue entry, plus the generic templates; a schema check at load (`analysis/catalogue.py`): summaries may use only `{kw1}`–`{kw3}`; actions and signals may also use the week's figures (`{count}`, `{recent_count}`, `{share}`, `{negative_share}`, `{trend}`); no typed digits anywhere.
+- [x] Tests:
+  - [x] name filter: "Rahul from support was rude", "I am Priya Sharma", "Mr Verma", "agent Neha" are skipped; "UPI", "IPO", "Nifty", "iPad", "Monday" are not;
+  - [x] quote scoring: deterministic choice, the keyword window, 1–2★ preference, three distinct reviews;
+  - [x] templates: placeholders filled, the week's figures in actions and signals, no numbers in summaries, generic fallback for an unmatched theme;
+  - [x] fallbacks: the next candidate on a quote failure; short templates on word-count overflow; `failure.json` after 2 rounds;
+  - [x] end-to-end `pulse run --dry-run --skip-ingest` with the local engine on fixture reviews, using a stub embedding function in CI so no model download is needed;
+  - [x] the existing validator contract tests and golden file keep passing unchanged.
 
 ### Deliverables
 - **M1:** `pulse run --dry-run` produces `runs/{week}/pulse.md` from real reviews, with no API key.
+
+*Status (2026-11-22): **M1 reached with the local engine.** `pulse run --dry-run --skip-ingest --week 2026-W46` passes every validator check on the first attempt (246/250 words) with no API key and no network after the model is cached. The name filter flags 13% of W46 reviews as possibly naming a person; they are never quoted. Still open: the human read of the pulse.*
 
 ### Exit criteria
 - The dry run on real W46 data passes every validator check, with no network call after the model is cached.
@@ -388,7 +392,7 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
   - [ ] A source fails → continue and record it; stop if fewer than `min_reviews` (default 50).
   - [ ] *(LLM engine)* Backoff at the stage level on top of the SDK's own retries.
   - [ ] *(LLM engine)* Log the refusal category and stop the stage cleanly.
-  - [ ] *(Local engine)* Missing embedding model with no network: a clear error naming `analysis.local.model`.
+  - [x] *(Local engine)* Missing embedding model with no network: a clear error naming `analysis.local.model` (`LocalEngineError`, built with Phase 3).
   - [ ] Partial publish → resume.
 - [ ] Clear CLI exit codes (0 for success, a non-zero code per failure class) and readable summaries.
 - [ ] `pulse prune`: remove raw files older than 16 weeks.
