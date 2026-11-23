@@ -1,4 +1,4 @@
-Groww Weekly Review Pulse — Week of 9 Nov 2026
+ReviewPulse: Groww app reviews — Week of 9 Nov 2026
 Source: 1,348 reviews (Play Store 1,202 · App Store 146), 9+ words, English only, 7 Sep – 15 Nov 2026 · 19% general praise
 
 Top Themes

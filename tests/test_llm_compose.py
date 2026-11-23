@@ -201,7 +201,7 @@ def test_compose_first_attempt(cfg, tmp_path):
     assert write_call["effort"] == "high"
 
     paths = write_compose_artifacts(result, cfg, tmp_path)
-    assert paths["pulse_md"].read_text("utf-8").startswith("Groww Weekly Review Pulse")
+    assert paths["pulse_md"].read_text("utf-8").startswith("ReviewPulse: Groww app reviews")
     assert set(paths) == {"pulse_json", "pulse_md", "validation"}
 
 

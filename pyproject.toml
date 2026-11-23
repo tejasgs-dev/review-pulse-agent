@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "review-pulse"
 version = "0.1.0"
-description = "Weekly pulse of public Groww app reviews, published to Google Docs and Gmail via MCP."
+description = "ReviewPulse: weekly insights from Groww app reviews, published to Google Docs and Gmail via MCP."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -26,6 +26,11 @@ dependencies = [
     "model2vec>=0.10,<0.11",
     "huggingface-hub>=0.24",
 ]
+
+[project.urls]
+Homepage = "https://github.com/tejasgs-dev/review-pulse-agent"
+Repository = "https://github.com/tejasgs-dev/review-pulse-agent"
+Issues = "https://github.com/tejasgs-dev/review-pulse-agent/issues"
 
 [project.optional-dependencies]
 # Optional paid engine: `pulse run --engine llm` (Claude API, needs ANTHROPIC_API_KEY).

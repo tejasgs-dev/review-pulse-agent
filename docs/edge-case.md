@@ -1,4 +1,4 @@
-# Edge Cases and Corner Scenarios: Groww Weekly Review Pulse
+# Edge Cases and Corner Scenarios: ReviewPulse (Groww app reviews)
 
 > Companion to [architecture.md](architecture.md) (**how**) and [implementation-plan.md](implementation-plan.md) (**when**). Section references such as §4.3 point to `architecture.md`; phase references (P1–P7) point to `implementation-plan.md`.
 

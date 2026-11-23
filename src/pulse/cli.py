@@ -54,7 +54,7 @@ _utf8_console()
 
 app = typer.Typer(
     name="pulse",
-    help="Groww Weekly Review Pulse: public reviews → one-page pulse → Google Doc + email.",
+    help="ReviewPulse: weekly insights from Groww app reviews → Google Doc + email.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -151,7 +151,7 @@ def main(
                      callback=_show_version, is_eager=True),
     ] = False,
 ) -> None:
-    """Groww Weekly Review Pulse."""
+    """ReviewPulse: weekly insights from Groww app reviews."""
 
 
 @app.command()

@@ -75,8 +75,9 @@ def test_week_of_uses_iso_monday():  # RND-04
     assert week_of("2026-W46") == "Week of 9 Nov 2026"
     assert week_of("2026-W53") == "Week of 28 Dec 2026"
     assert week_of("2027-W01") == "Week of 4 Jan 2027"
-    assert header("Groww", "2026-W46") == "Groww Weekly Review Pulse — Week of 9 Nov 2026"
-    assert email_subject("Groww", "2026-W46") == "Groww Review Pulse — Week of 9 Nov 2026"
+    title = "ReviewPulse: Groww app reviews — Week of 9 Nov 2026"
+    assert header("Groww", "2026-W46") == title
+    assert email_subject("Groww", "2026-W46") == title
 
 
 def test_quote_keeps_inner_text_and_collapses_whitespace():  # CMP-14, CMP-17

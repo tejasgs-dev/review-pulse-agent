@@ -123,7 +123,7 @@ class RunSummary:
     def render_text(self) -> str:
         rows = self._rows()
         width = max(len(k) for k, _ in rows)
-        lines = [f"── pulse {self.command} {self.week} " + "─" * 30]
+        lines = [f"── ReviewPulse · pulse {self.command} {self.week} " + "─" * 30]
         lines += [f"  {k:<{width}}  {v}" for k, v in rows]
         return "\n".join(lines)
 
@@ -131,7 +131,7 @@ class RunSummary:
         def cell(v: str) -> str:
             return v.replace("|", "\\|").replace("\n", " ")
 
-        lines = [f"### pulse {self.command} {self.week}", "", "| | |", "|---|---|"]
+        lines = [f"### ReviewPulse · pulse {self.command} {self.week}", "", "| | |", "|---|---|"]
         lines += [f"| {k} | {cell(v)} |" for k, v in self._rows()]
         return "\n".join(lines) + "\n"
 

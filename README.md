@@ -1,6 +1,10 @@
-# Groww Weekly Review Pulse
+# ReviewPulse
 
-Turns public Groww Play Store and App Store reviews into a one-page weekly pulse, appended to a Google Doc and emailed to you, through MCP servers only.
+[![CI](https://github.com/tejasgs-dev/review-pulse-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/tejasgs-dev/review-pulse-agent/actions/workflows/ci.yml)
+
+**ReviewPulse: weekly insights from Groww app reviews.**
+
+ReviewPulse turns public Groww Play Store and App Store reviews into a one-page weekly pulse, appended to a Google Doc and emailed to you, through MCP servers only.
 
 By default the analysis is **free and runs on your machine**: themes come from sentence embeddings (model2vec) and k-means, and the pulse is written by rules and templates. No API key is needed and no review text leaves the machine. The Claude API is an optional engine (`--engine llm`).
 
@@ -47,14 +51,14 @@ The first analysis downloads the embedding model (about 30 MB, pinned revision) 
 Publishing goes through one MCP server, [gworkspace-mcp](https://github.com/tejasgs-dev/GmailGdocMCPServer), deployed on Render (`mcp:` in `config/pulse.yaml`, Streamable HTTP). **The app never talks to Google itself**: the server holds the Google OAuth tokens and makes the API calls. For each week the app:
 
 1. **checks** the Doc for the week's marker, e.g. `(2026-W46)`, with the read-only `doc_contains_text` tool. If it is there, the week is already published: nothing else happens and the run succeeds;
-2. **appends** the pulse to one Google Doc that you created by hand (`append_to_doc`): a separator line, a heading like `Week of 9 Nov 2026 (2026-W46)`, then the pulse as plain text;
+2. **appends** the pulse to one Google Doc that you created by hand (`append_to_doc`): a separator line, a heading like `ReviewPulse — Week of 9 Nov 2026 (2026-W46)`, then the pulse as plain text;
 3. **sends** one email to `PULSE_RECIPIENT` with the pulse text and the Doc link (`send_email`).
 
 It never calls `create_doc`. `send_email` is the only sending tool it may call, only for step 3, and only to `PULSE_RECIPIENT` (no cc or bcc); any other tool map is refused at startup.
 
 Setup, once:
 
-1. **Create the Google Doc by hand** (any title, for example "Groww Weekly Review Pulse"), in the Google account the server is authorized for, or share it with that account.
+1. **Create the Google Doc by hand** (any title, for example "ReviewPulse: Groww app reviews"), in the Google account the server is authorized for, or share it with that account.
 2. **In `.env`** set:
    - `PULSE_DOC_ID`: the Doc's ID or URL. Publishing stops before any call if it is missing.
    - `PULSE_RECIPIENT`: the one address the pulse is emailed to.
@@ -123,7 +127,7 @@ pulse --version
 **The run summary.** `pulse run` and `pulse publish` end with a block like this (on GitHub Actions it is also added to the job's summary page):
 
 ```
-── pulse run 2026-W46 ──────────────────────────────
+── ReviewPulse · pulse run 2026-W46 ──────────────────────────────
   Result            OK (exit 0: success)
   Engine            local
   Play Store        failed, 0 in the window (HTTP 403)

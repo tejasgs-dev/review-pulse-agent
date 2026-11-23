@@ -23,11 +23,11 @@ from pulse.render.markdown import (
 from tests.conftest import TEST_DOC_ID
 
 WEEK = "2026-W46"
-HEADING = "Week of 9 Nov 2026 (2026-W46)"
+HEADING = "ReviewPulse — Week of 9 Nov 2026 (2026-W46)"
 MARKER = "(2026-W46)"
 DOC_URL = f"https://docs.google.com/document/d/{TEST_DOC_ID}/edit"
 KEY = "test-key-0123456789-0123456789-xyz"
-PULSE = ("Groww Weekly Review Pulse — Week of 9 Nov 2026\nSource: 3 reviews\n\nTop Themes\n"
+PULSE = ("ReviewPulse: Groww app reviews — Week of 9 Nov 2026\nSource: 3 reviews\n\nTop Themes\n"
          "1. Support (50% of reviews · 90% 1–2★) — Slow replies.\n")
 TOOL_MAP = PROJECT_ROOT / "src/pulse/publish/tool_map.yaml"
 runner = CliRunner()
@@ -38,7 +38,8 @@ def write_week(cfg, *, doc=PULSE, ok=True, failure=False):
     wd.mkdir(parents=True, exist_ok=True)
     (wd / "pulse.md").write_text(doc, encoding="utf-8")
     (wd / "pulse.json").write_text(json.dumps({"week": WEEK, "email": {
-        "subject": "Groww Review Pulse — Week of 9 Nov 2026", "body": doc}}), encoding="utf-8")
+        "subject": "ReviewPulse: Groww app reviews — Week of 9 Nov 2026", "body": doc}}),
+        encoding="utf-8")
     (wd / "validation.json").write_text(json.dumps({"ok": ok}), encoding="utf-8")
     if failure:
         (wd / "failure.json").write_text("{}", encoding="utf-8")
@@ -63,7 +64,7 @@ def test_doc_entry_is_plain_text_with_a_separator_and_week_heading():
     assert lines[0] == DOC_SEPARATOR and set(DOC_SEPARATOR) == {"─"}
     assert lines[1] == HEADING == week_heading(WEEK)
     assert lines[2] == "Source: 3 reviews"           # the pulse header line is replaced
-    assert "Weekly Review Pulse" not in entry
+    assert "Weekly Review Pulse" not in entry and "Groww app reviews" not in entry
     assert entry.endswith("Slow replies.\n")
 
 
@@ -171,12 +172,12 @@ def test_not_yet_published_week_is_appended_then_emailed(pcfg, fake_mcp):
     record = publish_week(pcfg, WEEK)
     assert fake_mcp.tool_names() == ["doc_contains_text", "append_to_doc", "send_email"]
     assert fake_mcp.calls[0][1] == {"document_id": TEST_DOC_ID, "text": MARKER}
-    assert doc_text(fake_mcp) == ("Groww Weekly Review Pulse\n\n"
+    assert doc_text(fake_mcp) == ("ReviewPulse: Groww app reviews\n\n"
                                   + render_doc_entry(WEEK, PULSE))
     assert MARKER in doc_text(fake_mcp)
     (mail,) = fake_mcp.sent
     assert mail["to"] == "me@example.com"
-    assert mail["subject"] == "Groww Review Pulse — Week of 9 Nov 2026"
+    assert mail["subject"] == "ReviewPulse: Groww app reviews — Week of 9 Nov 2026"
     assert mail["body"] == PULSE.rstrip("\n") + f"\n\nFull pulse: {DOC_URL}\n"
     (_, args), = [c for c in fake_mcp.calls if c[0] == "send_email"]
     assert args["cc"] is None and args["bcc"] is None
@@ -222,6 +223,20 @@ def test_force_republishes_an_already_published_week(pcfg, fake_mcp):
     assert len(fake_mcp.sent) == 2 and doc_text(fake_mcp).count(MARKER) == 2
     assert forced["status"] == "sent" and forced["forced"] is True
     assert forced["previous_email"]["status"] == "sent"
+
+
+def test_an_entry_in_the_old_heading_format_still_counts_as_published(pcfg, fake_mcp):
+    # Entries appended before the rename read "Week of 9 Nov 2026 (2026-W46)", with no prefix.
+    # Only the marker matters, so the week is not published twice.
+    fake_mcp.docs[TEST_DOC_ID]["content"] += f"\n{DOC_SEPARATOR}\nWeek of 9 Nov 2026 {MARKER}\n"
+    write_week(pcfg)
+    assert publish_week(pcfg, WEEK)["status"] == "skipped"
+    assert fake_mcp.sent == []
+
+
+def test_the_old_pulse_header_line_is_still_replaced_by_the_heading():
+    old = PULSE.replace("ReviewPulse: Groww app reviews", "Groww Weekly Review Pulse", 1)
+    assert render_doc_entry(WEEK, old) == render_doc_entry(WEEK, PULSE)
 
 
 @pytest.mark.parametrize("other", ["(2026-W45)", "(2026-w46)", "( 2026-W46 )", "2026-W46"])

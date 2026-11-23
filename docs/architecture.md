@@ -1,4 +1,4 @@
-# Architecture: Groww Weekly Review Pulse
+# Architecture: ReviewPulse (weekly insights from Groww app reviews)
 
 > Companion to [problemStatement.md](problemStatement.md). This document describes **how** the system is built. The problem statement describes **what** it must do.
 
@@ -26,7 +26,7 @@
 
 ```
                          ┌───────────────────────────────────────────┐
-                         │          Review Pulse Agent (Python)      │
+                         │          ReviewPulse agent (Python)       │
   Public review sources  │                                           │   MCP (stdio / HTTP)
  ┌───────────────────┐   │  ┌─────────┐  ┌─────────┐  ┌───────────┐  │  ┌──────────────────┐
  │ Play Store public │──▶│  │ Ingest  │─▶│ Analyze │─▶│ Publish   │──┼─▶│ Google Docs MCP  │──▶ Google Docs
@@ -233,9 +233,9 @@ publish/
 **One shared Doc.** The project owner creates one Google Doc by hand and puts its ID in `PULSE_DOC_ID` (`publish.doc_id`; a Doc URL is accepted too). Every week is appended to it. **The app never creates a doc:** `create_doc` cannot be mapped, and publishing stops before any call if `PULSE_DOC_ID` is missing.
 
 **Publish flow (one week):**
-1. **Already published?** Each week has a unique marker, `({ISO week})`, for example `(2026-W46)` (`render/markdown.week_marker`). The heading `Week of {Monday} {marker}` always ends with it, exactly. Call `doc_contains_text(doc_id, marker)`; the server matches exactly and case-sensitively and replies `found: true` / `found: false` (any other reply is a failure, never "not published"). Found → log "already published", skip both steps, status `skipped`, exit 0. The Doc is the record, so this is the guard on GitHub Actions too. The tool is required: `pulse doctor` checks it, and without it nothing is published.
+1. **Already published?** Each week has a unique marker, `({ISO week})`, for example `(2026-W46)` (`render/markdown.week_marker`). The heading `ReviewPulse — Week of {Monday} {marker}` always ends with it, exactly; entries written before the rename (`Week of {Monday} {marker}`) carry the same marker, so they still count. Call `doc_contains_text(doc_id, marker)`; the server matches exactly and case-sensitively and replies `found: true` / `found: false` (any other reply is a failure, never "not published"). Found → log "already published", skip both steps, status `skipped`, exit 0. The Doc is the record, so this is the guard on GitHub Actions too. The tool is required: `pulse doctor` checks it, and without it nothing is published.
 2. **Append** with `append_to_doc(doc_id, entry)`. The entry is plain text (no Markdown symbols): a separator line (`────…`), the heading, then the pulse without its own header line (`render/markdown.render_doc_entry`).
-3. **Send** with `send_email(to=<PULSE_RECIPIENT>, subject="Groww Review Pulse — Week of {date}", body=<pulse text + "Full pulse: " + Doc link>)`. Never runs if the append failed.
+3. **Send** with `send_email(to=<PULSE_RECIPIENT>, subject="ReviewPulse: Groww app reviews — Week of {date}", body=<pulse text + "Full pulse: " + Doc link>)`. Never runs if the append failed.
 4. `publish.json` is rewritten after every step. A skip, or a failure before a step runs (connecting, the check), keeps the earlier run's doc and email entries; a failed append or send keeps them under `previous`; `failed_step` names the step. When a server tool reports an error, `pulse publish` says the server (or its Google access or settings) needs fixing, since running again will not help; a timeout or lost connection says to run again. If the send fails after the append, a re-run on the same machine sends without appending again, even though the marker is in the Doc. `--force` deliberately re-publishes: append and send again.
 
 **Sending rules.** `send_email` is the only sending tool the app may call, only for step 3, and only to `PULSE_RECIPIENT`:
@@ -377,7 +377,7 @@ runs/{iso_week}/
 ### 7.1 Google Doc (one page)
 
 ```
-Groww Weekly Review Pulse — Week of 9 Nov 2026
+ReviewPulse: Groww app reviews — Week of 9 Nov 2026
 Source: 1,348 reviews (Play Store 1,202 · App Store 146), 9+ words, English only, 7 Sep – 15 Nov 2026 · 19% general praise
 
 Top Themes
@@ -403,7 +403,7 @@ Action Ideas
 
 ```
 ────────────────────────────────────────
-Week of 9 Nov 2026 (2026-W46)
+ReviewPulse — Week of 9 Nov 2026 (2026-W46)
 Source: 1,348 reviews (…)
 
 Top Themes
@@ -413,7 +413,7 @@ Top Themes
 **Email** (sent, not drafted):
 
 - **To:** `PULSE_RECIPIENT` from config (yourself or an alias), exactly one address
-- **Subject:** `Groww Review Pulse — Week of {date}`
+- **Subject:** `ReviewPulse: Groww app reviews — Week of {date}`
 - **Body:** the same rendered note in plain text, followed by `Full pulse: {doc_url}`
 
 ---
@@ -497,7 +497,7 @@ mcp:
 ## 9. Repository Layout
 
 ```
-AI Agent+MCP/
+review-pulse-agent/
 ├── docs/
 │   ├── problemStatement.md
 │   └── architecture.md

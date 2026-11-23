@@ -1,4 +1,4 @@
-# Problem Statement: Groww Weekly Review Pulse
+# Problem Statement: ReviewPulse (weekly insights from Groww app reviews)
 
 ## 1. Overview
 
@@ -119,7 +119,7 @@ The note must contain:
 ## 8. Suggested Pulse Template
 
 ```
-Groww Weekly Review Pulse: Week of <date>
+ReviewPulse: Groww app reviews — Week of <date>
 Source: <N> Play Store / App Store reviews, <start date> to <end date>
 
 Top Themes
@@ -144,6 +144,6 @@ Action Ideas
 
 Derived from [problemStatement.txt](problemStatement.txt), which is kept unchanged as the original brief.
 
-**Amendment (2026-11-22):** the brief asked for a Gmail *draft*. The project owner changed the goal: the weekly pulse is **sent** as an email to one address, `PULSE_RECIPIENT`. All weeks go into one Google Doc that the owner created by hand (`PULSE_DOC_ID`); each week is appended under a heading such as "Week of 9 Nov 2026 (2026-W46)", and the app never creates a doc. See [architecture.md](architecture.md) §4.7.
+**Amendment (2026-11-22):** the brief asked for a Gmail *draft*. The project owner changed the goal: the weekly pulse is **sent** as an email to one address, `PULSE_RECIPIENT`. All weeks go into one Google Doc that the owner created by hand (`PULSE_DOC_ID`); each week is appended under a heading such as "ReviewPulse — Week of 9 Nov 2026 (2026-W46)", and the app never creates a doc. See [architecture.md](architecture.md) §4.7.
 
 **Amendment (2026-11-21):** the brief's review-source rule read "Use public review exports only—no scraping behind store logins or ToS-violating automation." It was changed to the §6 wording above, to allow reading the public Play Store listing. The brief names that listing as the primary target, and only Groww's developers can download a Play Console export. The project owner approved this for the course project. The decision and its risk are recorded in [architecture.md](architecture.md) §13 #2.

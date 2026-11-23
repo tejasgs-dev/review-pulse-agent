@@ -74,7 +74,7 @@ def test_play_store_down_still_runs_with_the_note(tmp_config, tmp_path, monkeypa
     assert NOTE in pulse["email"]["body"]
     manifest = json.loads((week / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["ingest"]["sources"]["play_store"]["status"] == "failed"
-    summary = out(result).split("── pulse run")[1]
+    summary = out(result).split("── ReviewPulse · pulse run")[1]
     assert "Result OK (exit 0: success)" in summary
     assert "Play Store failed, 0 in the window (HTTP 403 (blocked))" in summary
     assert f"Note {NOTE}" in summary and "Publish dry run" in summary
@@ -96,7 +96,7 @@ def test_play_store_down_and_too_few_left_stops_with_7(tmp_config, tmp_path, mon
     result = runner.invoke(app, ["run", "--week", WEEK, "--dry-run",
                                  "--config", str(tmp_config())])
     assert result.exit_code == ExitCode.TOO_FEW_REVIEWS
-    summary = out(result).split("── pulse run")[1]
+    summary = out(result).split("── ReviewPulse · pulse run")[1]
     assert "exit 7: too few reviews" in summary
     assert "Reviews analysed 10 (minimum 50)" in summary
     assert f"Stopped at analyze: {NOTE} and only 10 reviews are left" in summary
@@ -131,12 +131,13 @@ def pcfg(publish_config):
     return load_config(publish_config(), load_env_file=False)
 
 
-def write_week(cfg, doc="Groww Weekly Review Pulse — Week of 9 Nov 2026\nSource: 3 reviews\n"):
+def write_week(cfg, doc="ReviewPulse: Groww app reviews — Week of 9 Nov 2026\nSource: 3 reviews\n"):
     wd = cfg.paths.runs_path / WEEK
     wd.mkdir(parents=True, exist_ok=True)
     (wd / "pulse.md").write_text(doc, encoding="utf-8")
     (wd / "pulse.json").write_text(json.dumps({"week": WEEK, "email": {
-        "subject": "Groww Review Pulse — Week of 9 Nov 2026", "body": doc}}), encoding="utf-8")
+        "subject": "ReviewPulse: Groww app reviews — Week of 9 Nov 2026", "body": doc}}),
+        encoding="utf-8")
     (wd / "validation.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
 
 
@@ -333,7 +334,7 @@ def test_the_summary_goes_to_the_github_job_summary(publish_config, tmp_path, mo
     result = runner.invoke(app, ["run", "--week", WEEK, "--config", str(publish_config())])
     assert result.exit_code == ExitCode.OK, result.output
     md = target.read_text(encoding="utf-8")
-    assert md.startswith(f"### pulse run {WEEK}")
+    assert md.startswith(f"### ReviewPulse · pulse run {WEEK}")
     assert "| Result | OK (exit 0: success) |" in md and f"| Note | {NOTE} |" in md
     assert "| Top themes |" in md and "| Publish | sent" in md
     # Public logs: no recipient, no Doc link, no review text.
@@ -359,7 +360,7 @@ def test_on_github_actions_no_pulse_text_or_recipient_in_the_logs(publish_config
     assert "the pulse text is not printed on GitHub Actions" in result.output
     assert "me@example.com" not in result.output
     assert "Email sent to PULSE_RECIPIENT" in result.output
-    assert "── pulse run" in out(result) and "Publish sent" in out(result)
+    assert "── ReviewPulse · pulse run" in out(result) and "Publish sent" in out(result)
 
 
 def test_on_github_actions_a_server_error_quoting_the_recipient_is_redacted(
@@ -389,7 +390,7 @@ def test_failed_run_summary_lists_the_failure(publish_config, monkeypatch, fake_
     fake_mcp.fail["append_to_doc"] = "Permission denied — check that the API is enabled."
     result = runner.invoke(app, ["run", "--week", WEEK, "--config", str(publish_config())])
     assert result.exit_code == ExitCode.PUBLISH_FAILED
-    text = out(result).split("── pulse run")[1]
+    text = out(result).split("── ReviewPulse · pulse run")[1]
     assert "exit 11: publishing through MCP failed" in text
     assert "Stopped at publish: append_to_doc failed: Permission denied" in text
     assert fake_mcp.sent == []

@@ -95,6 +95,9 @@ def unavailable_note(names: tuple[str, ...] | list[str]) -> str:
     return f"{' and '.join(labels)} unavailable this week" if labels else ""
 
 
+PRODUCT_NAME = "ReviewPulse"
+
+
 def week_of(week: str) -> str:
     """'Week of 9 Nov 2026': the Monday of the ISO week (RND-04)."""
     monday, _ = parse_iso_week(week)
@@ -102,12 +105,13 @@ def week_of(week: str) -> str:
 
 
 def header(product: str, week: str) -> str:
-    return f"{product} Weekly Review Pulse — {week_of(week)}"
+    """'ReviewPulse: Groww app reviews — Week of 9 Nov 2026'."""
+    return f"{PRODUCT_NAME}: {product} app reviews — {week_of(week)}"
 
 
 def email_subject(product: str, week: str) -> str:
-    """§7.2: 'Groww Review Pulse — Week of 9 Nov 2026'."""
-    return f"{product} Review Pulse — {week_of(week)}"
+    """§7.2: 'ReviewPulse: Groww app reviews — Week of 9 Nov 2026'."""
+    return f"{PRODUCT_NAME}: {product} app reviews — {week_of(week)}"
 
 
 def _one_line(text: str) -> str:
@@ -175,9 +179,9 @@ def week_marker(week: str) -> str:
 
 
 def week_heading(week: str) -> str:
-    """'Week of 9 Nov 2026 (2026-W46)': the heading of a week's entry; always ends with the
-    exact marker."""
-    return f"{week_of(week)} {week_marker(week)}"
+    """'ReviewPulse — Week of 9 Nov 2026 (2026-W46)': the heading of a week's entry; always
+    ends with the exact marker (duplicate protection looks for the marker only)."""
+    return f"{PRODUCT_NAME} — {week_of(week)} {week_marker(week)}"
 
 
 def plain_text(text: str) -> str:
@@ -188,11 +192,16 @@ def plain_text(text: str) -> str:
         for line in text.splitlines())
 
 
+def _is_header_line(line: str) -> bool:
+    """The pulse's own header line: the current one, or the older '… Weekly Review Pulse — …'."""
+    return line.startswith(f"{PRODUCT_NAME}:") or "Weekly Review Pulse" in line
+
+
 def render_doc_entry(week: str, doc_text: str) -> str:
     """The text appended to the shared Doc for one week: a separator line, the week heading,
     then the pulse without its own header line (the heading replaces it)."""
     lines = plain_text(doc_text).strip("\n").splitlines()
-    if lines and "Weekly Review Pulse" in lines[0]:
+    if lines and _is_header_line(lines[0]):
         lines = lines[1:]
     return "\n".join([DOC_SEPARATOR, week_heading(week), *lines]).rstrip() + "\n"
 

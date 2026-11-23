@@ -151,8 +151,8 @@ def fake_mcp(monkeypatch):
     from tests.fake_mcp import FakeWorkspace
 
     ws = FakeWorkspace()
-    ws.docs[TEST_DOC_ID] = {"title": "Groww Weekly Review Pulse",
-                            "content": "Groww Weekly Review Pulse\n"}
+    ws.docs[TEST_DOC_ID] = {"title": "ReviewPulse: Groww app reviews",
+                            "content": "ReviewPulse: Groww app reviews\n"}
     ws.connections = 0
 
     @asynccontextmanager

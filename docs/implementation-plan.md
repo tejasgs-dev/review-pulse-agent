@@ -1,4 +1,4 @@
-# Implementation Plan: Groww Weekly Review Pulse
+# Implementation Plan: ReviewPulse (weekly insights from Groww app reviews)
 
 > Built from [problemStatement.md](problemStatement.md) (**what**) and [architecture.md](architecture.md) (**how**). Section references such as §4.3 point to `architecture.md`.
 
@@ -374,7 +374,7 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 - [x] `publish/tool_map.yaml`: `docs.append_to_doc`, `docs.doc_contains_text` (required), `gmail.send_email`, with argument templates and result patterns (`ok`, `not_found`), because this server returns text, not structured results.
 - [x] Startup check: every mapped tool exists in `list_tools()` with every argument in its input schema and every required field given (MCP-01/02); **A tool whose name contains `send` may only be `gmail.send_email`, whose arguments must be exactly `to`/`subject`/`body`** (MCP-03); any argument that could send is refused (MCP-04); `create_doc` can never be mapped (MCP-10); `isError` or unexpected text is a failure (MCP-08).
 - [x] `config`: `publish.doc_id` from `PULSE_DOC_ID` (an ID or a Doc URL, validated); `docs_folder_id` and `doc_title` removed. Publishing stops before any call when it is missing.
-- [x] `render/markdown.render_doc_entry`: plain text (Markdown symbols stripped), a separator line, the heading `Week of 9 Nov 2026 (2026-W46)` (always ending with the exact marker `(2026-W46)`), then the pulse without its header line.
+- [x] `render/markdown.render_doc_entry`: plain text (Markdown symbols stripped), a separator line, the heading `ReviewPulse — Week of 9 Nov 2026 (2026-W46)` (always ending with the exact marker `(2026-W46)`), then the pulse without its header line.
 - [x] `publish/docs_publisher.py`: `week_in_doc` (the duplicate check, `doc_contains_text`) and `append_entry` (`append_to_doc`; a missing Doc fails clearly).
 - [x] `publish/email_sender.py`: one email to `PULSE_RECIPIENT` with the §7.2 subject and the pulse text plus `Full pulse: {doc_url}`; any other `to` is refused before the call.
 - [x] `publish/runner.py`: check → append → send. The week's marker found in the Doc → "already published", both steps skipped, exit 0; after a failed send, a local re-run sends without appending again; `--force` re-publishes (append and send).
