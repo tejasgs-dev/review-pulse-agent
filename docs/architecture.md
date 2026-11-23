@@ -501,7 +501,8 @@ mcp:
 review-pulse-agent/
 ├── docs/
 │   ├── problemStatement.md
-│   └── architecture.md
+│   ├── architecture.md
+│   └── stitch-export/            # Google Stitch design reference for site/; not served
 ├── config/
 │   ├── pulse.yaml
 │   └── themes.yaml               # theme catalogue: labels, keywords, templates
@@ -548,8 +549,7 @@ review-pulse-agent/
 ├── site/                         # static website (Render Static Site, publish dir site/)
 │   ├── index.html, weeks.html, how.html
 │   ├── assets/                   # styles.css, app.js
-│   ├── pulses/                   # written by `pulse export-site`; committed (§6 exception)
-│   └── stitch-export/            # Google Stitch design reference only; not loaded by the site
+│   └── pulses/                   # written by `pulse export-site`; committed (§6 exception)
 ├── data/   (git-ignored)
 ├── runs/   (git-ignored)
 ├── .env.example

@@ -173,7 +173,7 @@ The scheduled workflow itself is set up in Phase 7. What it needs from this repo
 
 ## Website
 
-`site/` is a static, read-only website for the pulses: **Dashboard** (latest week, with a week selector), **Past weeks** and **How it works**. It is plain HTML, CSS and JavaScript, with no build step, no backend and no secrets. The design came from Google Stitch; that export is kept in `site/stitch-export/` as a reference only.
+`site/` is a static, read-only website for the pulses: **Dashboard** (latest week, with a week selector), **Past weeks** and **How it works**. It is plain HTML, CSS and JavaScript, with no build step, no backend and no secrets. The design came from Google Stitch; that export is kept in `docs/stitch-export/` as a reference only, outside `site/` so it is not served.
 
 **Data.** The pages read `site/pulses/index.json` and `site/pulses/{week}.json`, which `pulse export-site --week <W>` writes from `runs/<W>/`. These files are committed. They hold counts, theme labels and shares, the top-3 summaries, the three quotes (theme, text, rating, store) and the three actions, and nothing else: no review IDs, no keywords, no other review text (architecture §6, written exception). The export refuses a week that failed validation and re-scans every text field for PII.
 
