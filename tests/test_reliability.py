@@ -16,7 +16,7 @@ from pulse.publish import mcp_client as mc
 from pulse.publish import runner as pub
 from pulse.publish.runner import PublishError, publish_path, publish_week
 from pulse.render.markdown import render_doc_entry, source_line
-from pulse.summary import EXIT_MEANINGS, RunSummary
+from pulse.summary import EXIT_MEANINGS, RunSummary, redact_recipient
 from tests.conftest import TEST_DOC_ID, raw
 from tests.local_corpus import corpus
 from tests.test_ingest_runner import FakeSource
@@ -376,6 +376,47 @@ def test_on_github_actions_a_server_error_quoting_the_recipient_is_redacted(
     assert "recipient not allowed: PULSE_RECIPIENT" in out(result)
     assert "me@example.com" not in result.output
     assert "me@example.com" not in target.read_text(encoding="utf-8")
+
+
+def test_the_recipient_is_redacted_in_any_letter_case():
+    text = "550 recipient ME@Example.com rejected (me@example.com)"
+    assert redact_recipient(text, " me@example.com ") == (
+        "550 recipient PULSE_RECIPIENT rejected (PULSE_RECIPIENT)")
+    assert redact_recipient(text, None) == text
+
+
+def test_on_github_actions_an_invalid_recipient_is_not_echoed_by_the_config_error(
+        publish_config, monkeypatch):
+    path = str(publish_config())
+    monkeypatch.setenv("PULSE_RECIPIENT", "me@example.com, boss@example.com")
+    local = runner.invoke(app, ["doctor", "--offline", "--config", path])
+    assert local.exit_code == ExitCode.CONFIG_ERROR
+    assert "boss@example.com" in out(local)                # locally the error names the value
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    result = runner.invoke(app, ["run", "--week", WEEK, "--config", path])
+    assert result.exit_code == ExitCode.CONFIG_ERROR
+    assert "recipient must be exactly one valid email address" in out(result)
+    assert "example.com" not in out(result) and "PULSE_RECIPIENT" in out(result)
+
+
+def test_on_github_actions_an_unexpected_error_quoting_the_recipient_is_redacted(
+        publish_config, tmp_path, monkeypatch, fake_mcp):
+    def boom(*a, **k):
+        raise RuntimeError("tool crashed while mailing Me@Example.com")
+
+    monkeypatch.setattr(pub, "publish_week", boom)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    target = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(target))
+    path = str(publish_config())
+    write_week(load_config(path, load_env_file=False))
+    result = runner.invoke(app, ["publish", "--week", WEEK, "--config", path])
+    assert result.exit_code == ExitCode.UNEXPECTED_ERROR
+    text = out(result)
+    assert "Traceback" in text and "tool crashed while mailing PULSE_RECIPIENT" in text
+    assert "example.com" not in text.lower()               # message, traceback and summary
+    assert "example.com" not in target.read_text(encoding="utf-8").lower()
 
 
 def test_the_summary_skips_a_missing_github_summary_file(tmp_path, monkeypatch):

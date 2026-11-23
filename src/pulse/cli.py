@@ -21,7 +21,7 @@ import typer
 
 from pulse import __version__
 from pulse.config import ConfigError, PulseConfig, load_config
-from pulse.summary import RunSummary, on_github_actions, redact_recipient
+from pulse.summary import RunSummary, log_safe, on_github_actions
 from pulse.weeks import last_completed_week, parse_iso_week
 
 
@@ -108,7 +108,9 @@ def _load(config: Path | None) -> PulseConfig:
     try:
         return load_config(config)
     except ConfigError as e:
-        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        # A validation error quotes the bad value, so an invalid PULSE_RECIPIENT would appear.
+        typer.secho(log_safe(str(e), os.environ.get("PULSE_RECIPIENT")),
+                    fg=typer.colors.RED, err=True)
         raise typer.Exit(ExitCode.CONFIG_ERROR) from e
 
 
@@ -124,10 +126,12 @@ def _guarded(summary: RunSummary, *, show: bool) -> Iterator[None]:
         raise
     except Exception as e:
         code = ExitCode.UNEXPECTED_ERROR
+        recipient = summary.recipient or os.environ.get("PULSE_RECIPIENT")
         summary.fail(summary.current_stage, f"unexpected {type(e).__name__}: {e}"[:300])
-        typer.secho(f"  ✗ unexpected error in {summary.current_stage}: "
-                    f"{type(e).__name__}: {e}", fg=typer.colors.RED, err=True)
-        traceback.print_exc(file=sys.stderr)
+        typer.secho(log_safe(f"  ✗ unexpected error in {summary.current_stage}: "
+                             f"{type(e).__name__}: {e}", recipient),
+                    fg=typer.colors.RED, err=True)
+        sys.stderr.write(log_safe(traceback.format_exc(), recipient))
         raise typer.Exit(code) from e
     finally:
         if show:
@@ -177,7 +181,7 @@ def run(
     summary = RunSummary("run", week)
     with _guarded(summary, show=True):
         cfg = _with_engine(_load(config), engine)
-        summary.engine = cfg.analysis.engine
+        summary.engine, summary.recipient = cfg.analysis.engine, cfg.publish.recipient
         if weeks_back is not None:
             cfg = cfg.model_copy(update={"window": cfg.window.model_copy(
                 update={"weeks_back": weeks_back})})
@@ -556,8 +560,9 @@ def publish(week: WeekOpt = None, force: ForceOpt = False, email_only: EmailOnly
                                  param_hint="--email-only")
     summary = RunSummary("publish", week)
     with _guarded(summary, show=True):
-        _publish_stage(_load(config), week, force=force, email_only=email_only,
-                       summary=summary)
+        cfg = _load(config)
+        summary.recipient = cfg.publish.recipient
+        _publish_stage(cfg, week, force=force, email_only=email_only, summary=summary)
 
 
 def _publish_stage(cfg: PulseConfig, week: str, *, summary: RunSummary, force: bool = False,
@@ -566,12 +571,12 @@ def _publish_stage(cfg: PulseConfig, week: str, *, summary: RunSummary, force: b
     from pulse.publish.runner import PublishError, publish_path, publish_week
 
     summary.current_stage = "publish"
-    recipient = cfg.publish.recipient
+    recipient = summary.recipient = cfg.publish.recipient
 
     def shown(text: str) -> str:
         """On GitHub Actions (public logs) the recipient's address is never printed, even
         where a server error quotes it."""
-        return redact_recipient(text, recipient) if on_github_actions() else text
+        return log_safe(text, recipient)
 
     what = "send only the email to" if email_only else "append to the Google Doc, then email"
     typer.echo(shown(f"Publishing {week} through MCP ({what} "
@@ -583,7 +588,7 @@ def _publish_stage(cfg: PulseConfig, week: str, *, summary: RunSummary, force: b
         if e.record:
             update_manifest(cfg.paths.runs_path, week, "publish", _publish_summary(e.record))
         hint = _publish_hint(e, week)
-        summary.fail("publish", redact_recipient(str(e), recipient))  # the summary never has it
+        summary.fail("publish", str(e))     # redacted there: the summary never has it
         summary.publish = e.record.get("status") or "failed"
         summary.publish_detail = hint
         typer.secho(shown(f"  ✗ {e}"), fg=typer.colors.RED, err=True)
@@ -751,10 +756,12 @@ def doctor(
     for label, ok, hint in checks:
         mark = typer.style("ok  ", fg=typer.colors.GREEN) if ok else typer.style(
             "FAIL", fg=typer.colors.RED)
-        typer.echo(f"[{mark}] {label}" + ("" if ok else f"  ({hint})"))
+        typer.echo(log_safe(f"[{mark}] {label}" + ("" if ok else f"  ({hint})"),
+                            cfg.publish.recipient))
         failed += not ok
     for w in warnings:
-        typer.echo(f"[{typer.style('warn', fg=typer.colors.YELLOW)}] {w}")
+        typer.echo(log_safe(f"[{typer.style('warn', fg=typer.colors.YELLOW)}] {w}",
+                            cfg.publish.recipient))
     if failed:
         raise typer.Exit(ExitCode.DOCTOR_FAILED)
 

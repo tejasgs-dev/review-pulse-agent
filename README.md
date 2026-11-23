@@ -166,7 +166,7 @@ The scheduled workflow itself is set up in Phase 7. What it needs from this repo
 - **Commands**: `pulse doctor && pulse run`. Every failure exits non-zero, so the job fails visibly; the run summary appears on the job page.
 - **Cache `data/models/`** (keyed on `analysis.local.model_revision`), so the embedding model is not downloaded every week. The download is retried twice if it is.
 - **Nothing is kept between runs.** Each run backfills the whole review window, and `publish.json` is gone afterwards: the Doc marker stops a second publish, and `pulse publish --email-only` sends a missed email. Do not upload `runs/` or `data/` as workflow artifacts in a public repository: they hold review text.
-- **Public logs.** In a public repository anyone can read Actions logs. When `GITHUB_ACTIONS` is set, `pulse run` does not print the composed pulse (it is still in the Doc and the email), and the recipient's address is replaced by `PULSE_RECIPIENT` in every line, including server errors that quote it. The end-of-run summary never holds review text, the recipient or the Doc link.
+- **Public logs.** In a public repository anyone can read Actions logs. When `GITHUB_ACTIONS` is set, `pulse run` does not print the composed pulse (it is still in the Doc and the email), and the recipient's address is replaced by `PULSE_RECIPIENT` in every line (in any letter case), including server errors that quote it, config errors about an invalid `PULSE_RECIPIENT`, and unexpected errors with their tracebacks. The end-of-run summary never holds review text, the recipient or the Doc link.
 
 ## Troubleshooting
 

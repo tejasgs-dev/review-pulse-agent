@@ -9,6 +9,7 @@ and job summaries of a public repository are public.
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,8 +39,17 @@ def on_github_actions() -> bool:
 
 
 def redact_recipient(text: str, recipient: str | None) -> str:
-    """Replace the recipient's address with 'PULSE_RECIPIENT' (server errors can quote it)."""
-    return text.replace(recipient, "PULSE_RECIPIENT") if recipient else text
+    """Replace the recipient's address with 'PULSE_RECIPIENT' (server errors can quote it, in
+    any letter case)."""
+    recipient = (recipient or "").strip()
+    if not recipient:
+        return text
+    return re.sub(re.escape(recipient), "PULSE_RECIPIENT", text, flags=re.IGNORECASE)
+
+
+def log_safe(text: str, recipient: str | None) -> str:
+    """A line for the console: on GitHub Actions (public logs) the recipient is redacted."""
+    return redact_recipient(text, recipient) if on_github_actions() else text
 
 
 @dataclass
@@ -63,6 +73,8 @@ class RunSummary:
     error: str | None = None
     exit_code: int | None = None
     seconds: float | None = None
+    # Only used to keep the address out of `error`; never rendered.
+    recipient: str | None = field(default=None, repr=False)
 
     @property
     def unavailable(self) -> list[str]:
@@ -70,7 +82,7 @@ class RunSummary:
 
     def fail(self, stage: str, error: str) -> None:
         if self.error is None:          # keep the first, most specific failure
-            self.stage, self.error = stage, error
+            self.stage, self.error = stage, redact_recipient(error, self.recipient)
 
     def finish(self, exit_code: int) -> None:
         self.exit_code = int(exit_code)
