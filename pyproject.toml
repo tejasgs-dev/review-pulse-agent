@@ -9,7 +9,9 @@ description = "ReviewPulse: weekly insights from Groww app reviews, published to
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.10",
+    # Developed and tested on mcp 2.3.0. The code uses 2.x-only APIs (mcp.Client, MCPServer,
+    # streamable_http_client with an httpx2 client), so stay on major version 2.
+    "mcp>=2.3,<3",
     "pydantic>=2.7",
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
