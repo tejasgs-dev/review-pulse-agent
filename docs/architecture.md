@@ -256,13 +256,14 @@ publish/
 pulse run     [--week 2026-W47] [--weeks-back 10] [--dry-run] [--skip-ingest] [--engine local|llm]
 pulse ingest  [--source play_store|app_store|all] [--week ...] [--full]
 pulse analyze [--week ...] [--engine local|llm]   # stages 3–6 only, no publishing
-pulse publish [--week ...]           # stage 7 from saved run artifacts
-pulse doctor                         # checks config, MCP tools, and what the engine needs
+pulse publish [--week ...] [--force | --email-only]   # stage 7 from saved run artifacts
+pulse doctor  [--live|--offline]     # checks config, MCP tools, and what the engine needs
 ```
 
 - `--dry-run` runs every stage, writes `runs/{week}/pulse.md`, and **skips MCP calls**. Use it for review and in CI.
 - `--engine` overrides `analysis.engine` (default `local`). `llm` needs the `[llm]` extra and `ANTHROPIC_API_KEY`; `pulse doctor` checks the embedding model for `local` and the API credential only for `llm`.
 - Each stage reads the previous stage's saved output, so any stage can be re-run alone.
+- Every failure class has its own exit code (table in the README); an unexpected exception exits 1. `pulse run` and `pulse publish` end with a summary (sources, review count, themes, words, publish result, the failure if any), also appended to `$GITHUB_STEP_SUMMARY` on GitHub Actions. It holds no review text, recipient, or Doc link, because a public repository's Actions logs are public.
 
 ### 4.9 Scheduling
 
@@ -367,7 +368,7 @@ runs/{iso_week}/
 ```
 
 - `data/` and `runs/` are **git-ignored**. Even scrubbed review text stays out of version control.
-- Retention: raw files older than 16 weeks can be pruned (`pulse prune`).
+- Retention: no prune command. Scheduled runs happen on GitHub Actions, where nothing is kept between runs (the embedding model in `data/models/` is cached by the workflow). On a local machine, delete old `data/raw/` files by hand if they pile up.
 
 ---
 
@@ -504,8 +505,8 @@ AI Agent+MCP/
 │   ├── pulse.yaml
 │   └── themes.yaml               # theme catalogue: labels, keywords, templates
 ├── src/pulse/
-│   ├── cli.py
-│   ├── orchestrator.py
+│   ├── cli.py                    # commands, stage order, exit codes
+│   ├── summary.py                # end-of-run summary (terminal + GitHub job summary)
 │   ├── models.py                 # dataclasses from §5
 │   ├── ingest/
 │   │   ├── base.py               # ReviewSource protocol
@@ -554,15 +555,16 @@ AI Agent+MCP/
 
 | Failure | Behavior |
 |---|---|
-| A source is down or the feed returns nothing | Continue with the other sources; record it in `manifest.json` and in the pulse source line. Stop the run if the total is below `min_reviews` (default 50). |
+| A source is down or the feed returns nothing | Feed requests are retried with backoff first. Then continue with the other sources; record it in `manifest.json`, in the pulse source line ("Play Store unavailable this week") and in the run summary. Stop the run if the total is below `min_reviews` (default 50, exit 7), or if every source failed (exit 5). |
 | *(LLM engine)* Claude API 429 / 5xx / network error | SDK retries (`max_retries`), then exponential backoff at the stage level. Errors are caught most-specific first (`RateLimitError` → `APIStatusError` → `APIConnectionError`). |
 | *(LLM engine)* `stop_reason == "refusal"` | The server-side fallback handles it. If it still refuses, log the category and stop the stage. |
 | *(LLM engine)* Structured output fails validation | Re-prompt with the validation errors, up to 2 times, then stop before publishing. |
-| *(Local engine)* Embedding model missing and no network | Stop the analysis stage with a clear error naming `analysis.local.model`; nothing is published. CI caches `data/models/`. |
+| *(Local engine)* Embedding model missing and no network | The download is retried twice (5 s, 10 s). Then stop the analysis stage with a clear error naming `analysis.local.model`; nothing is published. CI caches `data/models/`. |
 | *(Local engine)* No stable k ≥ 3, or `other` above 25% after the retry | Stop with `RankError` / record `other_share_high`, as for the LLM engine. |
 | Validator fails (quotes, word count, PII) | The composer tries its next option (rules) or re-prompts (LLM), at most 2 times. **Nothing is published** on a final failure. |
-| MCP server unreachable or tool missing | `pulse doctor` and startup checks report it clearly. Analysis results are kept, so `pulse publish` can be re-run later. |
-| Docs succeeds but Gmail fails | `publish.json` records partial success, and re-running `pulse publish` sends the email without appending again. |
+| MCP server unreachable or tool missing | A lost connection or a timeout is retried (`mcp.retries`, backoff from `mcp.retry_delay_seconds`) wherever that cannot append or send twice; the send and a tool's own error are never retried. `pulse doctor` and startup checks report it clearly. Analysis results are kept, so `pulse publish` can be re-run later (exit 11). |
+| Docs succeeds but Gmail fails | `publish.json` records partial success, and re-running `pulse publish` sends the email without appending again. Where `publish.json` is not kept (GitHub Actions), `pulse publish --email-only` sends only the email after checking the entry is in the Doc. |
+| Unexpected exception (a bug) | Exit 1 with the traceback on stderr; the run summary names the stage. |
 | Duplicate run for the same week | The week's marker, e.g. `(2026-W46)`, found in the Doc (`doc_contains_text`) skips both steps and exits 0; `--force` re-publishes. |
 | `PULSE_DOC_ID` missing or wrong | Missing: stop before any call. Wrong or not shared: `append_to_doc` fails clearly and nothing is sent; no doc is ever created. |
 

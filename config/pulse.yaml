@@ -142,3 +142,7 @@ mcp:
     call_timeout_seconds: 90
   gmail: *gworkspace
   tool_map: src/pulse/publish/tool_map.yaml
+  # A lost connection or a timeout is retried (waits 10s, then 20s), only where that cannot
+  # append or send twice. The send itself and a tool's own error are never retried.
+  retries: 2
+  retry_delay_seconds: 10

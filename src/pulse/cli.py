@@ -1,7 +1,9 @@
 """`pulse` command-line entry point (architecture §4.8).
 
-Phase 0: commands parse and validate their options; the pipeline stages are stubs.
-`pulse doctor` already checks config and environment.
+`pulse run` chains the stages; `ingest`, `analyze` and `publish` run one part from the saved
+artifacts of the previous one. Every failure class has its own exit code (`ExitCode`), an
+unexpected exception exits 1 with its traceback, and `run` and `publish` end with a short
+summary (also written to the GitHub Actions job summary when $GITHUB_STEP_SUMMARY is set).
 """
 
 from __future__ import annotations
@@ -9,6 +11,8 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import traceback
+from collections.abc import Iterator
 from enum import IntEnum
 from pathlib import Path
 from typing import Annotated
@@ -17,15 +21,18 @@ import typer
 
 from pulse import __version__
 from pulse.config import ConfigError, PulseConfig, load_config
+from pulse.summary import RunSummary, on_github_actions, redact_recipient
 from pulse.weeks import last_completed_week, parse_iso_week
 
 
 class ExitCode(IntEnum):
+    """Kept in step with summary.EXIT_MEANINGS and the README's exit code table."""
+
     OK = 0
+    UNEXPECTED_ERROR = 1  # a bug or an unclassified failure; the traceback is printed
     CONFIG_ERROR = 2
-    NOT_IMPLEMENTED = 3
     DOCTOR_FAILED = 4
-    INGEST_FAILED = 5
+    INGEST_FAILED = 5     # every review source failed
     STORE_ERROR = 6
     TOO_FEW_REVIEWS = 7
     ANALYSIS_FAILED = 8   # the model's answers could not be made valid (Phase 3)
@@ -105,10 +112,29 @@ def _load(config: Path | None) -> PulseConfig:
         raise typer.Exit(ExitCode.CONFIG_ERROR) from e
 
 
-def _not_implemented(command: str, phase: int) -> None:  # kept for later phases
-    typer.secho(f"`pulse {command}` is not implemented yet (planned for Phase {phase}).",
-                fg=typer.colors.YELLOW, err=True)
-    raise typer.Exit(ExitCode.NOT_IMPLEMENTED)
+@contextlib.contextmanager
+def _guarded(summary: RunSummary, *, show: bool) -> Iterator[None]:
+    """Turn an unexpected exception into exit 1 (with its traceback on stderr), and, with
+    `show`, end with the run summary whatever happened."""
+    code: int = ExitCode.OK
+    try:
+        yield
+    except typer.Exit as e:
+        code = e.exit_code
+        raise
+    except Exception as e:
+        code = ExitCode.UNEXPECTED_ERROR
+        summary.fail(summary.current_stage, f"unexpected {type(e).__name__}: {e}"[:300])
+        typer.secho(f"  ✗ unexpected error in {summary.current_stage}: "
+                    f"{type(e).__name__}: {e}", fg=typer.colors.RED, err=True)
+        traceback.print_exc(file=sys.stderr)
+        raise typer.Exit(code) from e
+    finally:
+        if show:
+            summary.finish(code)
+            typer.echo("")
+            typer.echo(summary.render_text())
+            summary.write_step_summary()
 
 
 def _show_version(value: bool) -> None:
@@ -143,20 +169,34 @@ def run(
 
     With --dry-run every stage runs and the pulse is written to runs/{week}/, but nothing is
     sent to Google Docs or Gmail.
+
+    If one source fails, the run goes on with the other and the pulse says so ("Play Store
+    unavailable this week"); it stops if every source fails or fewer than analysis.min_reviews
+    reviews are left. The run ends with a summary and a non-zero exit code on any failure.
     """
-    cfg = _with_engine(_load(config), engine)
-    if weeks_back is not None:
-        cfg = cfg.model_copy(update={"window": cfg.window.model_copy(
-            update={"weeks_back": weeks_back})})
-    if skip_ingest:
-        typer.echo("Ingest skipped (--skip-ingest): using data/reviews.parquet as it is.")
-    else:
-        _ingest_stage(cfg, week, full=False, sources=None)
-    _analysis_stages(cfg, week)
-    if dry_run:
-        typer.secho("Dry run: nothing was published.", fg=typer.colors.GREEN)
-        return
-    _publish_stage(cfg, _week_option(week))
+    summary = RunSummary("run", week)
+    with _guarded(summary, show=True):
+        cfg = _with_engine(_load(config), engine)
+        summary.engine = cfg.analysis.engine
+        if weeks_back is not None:
+            cfg = cfg.model_copy(update={"window": cfg.window.model_copy(
+                update={"weeks_back": weeks_back})})
+        if skip_ingest:
+            typer.echo("Ingest skipped (--skip-ingest): using data/reviews.parquet as it is.")
+        else:
+            report = _ingest_stage(cfg, week, full=False, sources=None, summary=summary)
+            if report.all_failed:   # §10 row 1: no source answered, so there is nothing new
+                summary.fail("ingest", "every review source failed")
+                typer.secho("  ✗ every review source failed; nothing to analyse",
+                            fg=typer.colors.RED, err=True)
+                raise typer.Exit(ExitCode.INGEST_FAILED)
+        _analysis_stages(cfg, week, summary)
+        if dry_run:
+            summary.publish = "dry run"
+            summary.publish_detail = "nothing was published"
+            typer.secho("Dry run: nothing was published.", fg=typer.colors.GREEN)
+            return
+        _publish_stage(cfg, week, summary=summary)
 
 
 @app.command()
@@ -170,24 +210,33 @@ def ingest(
     """Fetch and normalize reviews into data/reviews.parquet."""
     if source not in {"play_store", "app_store", "all"}:
         raise typer.BadParameter("must be play_store, app_store, or all", param_hint="--source")
-    cfg = _load(config)
-    report = _ingest_stage(cfg, week, full=full,
-                           sources=None if source == "all" else [source])
-    if report.all_failed:
-        raise typer.Exit(ExitCode.INGEST_FAILED)
+    summary = RunSummary("ingest", week)
+    with _guarded(summary, show=False):
+        cfg = _load(config)
+        report = _ingest_stage(cfg, week, full=full,
+                               sources=None if source == "all" else [source], summary=summary)
+        if report.all_failed:
+            raise typer.Exit(ExitCode.INGEST_FAILED)
 
 
-def _ingest_stage(cfg: PulseConfig, week: str, *, full: bool, sources: list[str] | None):
+def _ingest_stage(cfg: PulseConfig, week: str, *, full: bool, sources: list[str] | None,
+                  summary: RunSummary):
     """Stages 1–2: fetch, normalize, upsert into data/reviews.parquet, and report."""
     from pulse.ingest.normalize import DROP_RULES
     from pulse.ingest.runner import run_ingest
     from pulse.ingest.store import StoreSchemaError
 
+    summary.current_stage = "ingest"
     try:
         report = run_ingest(cfg, week=week, full=full, sources=sources)
     except StoreSchemaError as e:
+        summary.fail("ingest", str(e))
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(ExitCode.STORE_ERROR) from e
+    for s in report.sources:
+        summary.sources[s.name] = {"status": s.status, "fetched": s.fetched,
+                                   "in_window": report.in_window.get(s.name),
+                                   "error": s.error}
 
     labels = {
         "dropped_bad_rating": "bad rating", "dropped_bad_date": "no date",
@@ -242,27 +291,56 @@ def _ingest_stage(cfg: PulseConfig, week: str, *, full: bool, sources: list[str]
 @app.command()
 def analyze(week: WeekOpt = None, engine: EngineOpt = None, config: ConfigOpt = None) -> None:
     """Stages 3–6 only (no publishing): scrub, cluster, compose, validate."""
-    _analysis_stages(_with_engine(_load(config), engine), week)
+    summary = RunSummary("analyze", week)
+    with _guarded(summary, show=False):
+        _analysis_stages(_with_engine(_load(config), engine), week, summary)
 
 
-def _analysis_stages(cfg: PulseConfig, week: str) -> None:
+def _sources_from_manifest(cfg: PulseConfig, week: str) -> dict[str, dict]:
+    """The week's last ingest, per source, from runs/{week}/manifest.json (empty if none)."""
+    from pulse.manifest import read_manifest
+
+    ingest = read_manifest(cfg.paths.runs_path, week).get("ingest") or {}
+    in_window = ingest.get("in_window") or {}
+    return {name: {"status": s.get("status"), "fetched": s.get("fetched", 0),
+                   "in_window": in_window.get(name), "error": s.get("error")}
+            for name, s in (ingest.get("sources") or {}).items() if isinstance(s, dict)}
+
+
+def _analysis_stages(cfg: PulseConfig, week: str, summary: RunSummary) -> None:
     from pulse.ingest.normalize import in_window
     from pulse.ingest.store import ReviewStore, StoreSchemaError
     from pulse.manifest import update_manifest
     from pulse.privacy.scrub import scrub_all, write_clean_reviews
+    from pulse.render.markdown import unavailable_note
     from pulse.weeks import review_window
 
+    summary.current_stage = "analyze"
+    summary.engine = cfg.analysis.engine
+    if not summary.sources:       # --skip-ingest or `pulse analyze`: the week's last ingest
+        summary.sources = _sources_from_manifest(cfg, week)
+    unavailable = summary.unavailable
     start, end = review_window(week, cfg.window.weeks_back)
     try:
         stored = ReviewStore(cfg.paths.data_path / "reviews.parquet").load()
     except StoreSchemaError as e:
+        summary.fail("analyze", str(e))
         typer.secho(str(e), fg=typer.colors.RED, err=True)
         raise typer.Exit(ExitCode.STORE_ERROR) from e
     reviews = in_window(stored.values(), start, end)
+    summary.reviews, summary.min_reviews = len(reviews), cfg.analysis.min_reviews
     typer.echo(f"Analyze {week} · window {start} – {end} · {len(reviews)} reviews")
+    if unavailable:
+        typer.secho(f"  ! {unavailable_note(unavailable)}: the pulse says so in its source "
+                    "line", fg=typer.colors.YELLOW)
     if len(reviews) < cfg.analysis.min_reviews:  # §10 row 1
-        typer.secho(f"  ✗ fewer than analysis.min_reviews={cfg.analysis.min_reviews} reviews; "
-                    "run `pulse ingest` first", fg=typer.colors.RED, err=True)
+        why = (f"{unavailable_note(unavailable)} and only {len(reviews)} reviews are left"
+               if unavailable else f"only {len(reviews)} reviews in the window")
+        summary.fail("analyze", f"{why}; analysis needs at least {cfg.analysis.min_reviews} "
+                     "(analysis.min_reviews)")
+        typer.secho(f"  ✗ fewer than analysis.min_reviews={cfg.analysis.min_reviews} reviews"
+                    + (f" ({unavailable_note(unavailable)})" if unavailable
+                       else "; run `pulse ingest` first"), fg=typer.colors.RED, err=True)
         raise typer.Exit(ExitCode.TOO_FEW_REVIEWS)
 
     # Stage 3: PII scrub. Only counts are reported; found values are never printed or logged.
@@ -289,13 +367,16 @@ def _analysis_stages(cfg: PulseConfig, week: str) -> None:
         try:
             catalogue = load_catalogue(cfg.analysis.catalogue_path)
         except CatalogueError as e:
+            summary.fail("analyze", str(e).splitlines()[0])
             typer.secho(str(e), fg=typer.colors.RED, err=True)
             raise typer.Exit(ExitCode.CONFIG_ERROR) from e
-    cluster = _cluster_stage(cfg, week, (start, end), result.reviews, llm, catalogue)
-    _compose_stage(cfg, week, cluster, result.reviews, llm, catalogue)
+    cluster = _cluster_stage(cfg, week, (start, end), result.reviews, llm, catalogue, summary)
+    _compose_stage(cfg, week, cluster, result.reviews, llm, catalogue, summary,
+                   unavailable=unavailable)
 
 
-def _cluster_stage(cfg: PulseConfig, week: str, window, reviews, llm, catalogue):
+def _cluster_stage(cfg: PulseConfig, week: str, window, reviews, llm, catalogue,
+                   summary: RunSummary):
     """Stage 4: theme clustering and ranking → runs/{week}/themes.json (§4.4)."""
     import time
 
@@ -306,6 +387,7 @@ def _cluster_stage(cfg: PulseConfig, week: str, window, reviews, llm, catalogue)
 
     runs = cfg.paths.runs_path
     engine = cfg.analysis.engine
+    summary.current_stage = "cluster"
     started = time.monotonic()
     try:
         if engine == "llm":
@@ -329,6 +411,7 @@ def _cluster_stage(cfg: PulseConfig, week: str, window, reviews, llm, catalogue)
             "refusal_category": getattr(e, "category", None),
             **({"usage": llm.usage.to_dict()} if llm is not None else {}),
         })
+        summary.fail("cluster", str(e))
         typer.secho(f"  ✗ {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code) from e
 
@@ -338,6 +421,8 @@ def _cluster_stage(cfg: PulseConfig, week: str, window, reviews, llm, catalogue)
     update_manifest(runs, week, "cluster", section)
 
     labels = {t.id: t.label for t in result.themes}
+    summary.themes = [labels[t] for t in result.top if t in labels]
+    summary.warnings += [w["message"] for w in result.warnings]
     for s in result.ranked:
         star = "★" if s.theme_id in result.top else " "
         typer.echo(f"   {star} {s.rank}. {labels[s.theme_id]:<28} {s.volume_share:6.1%}  "
@@ -367,7 +452,8 @@ def _cluster_stage(cfg: PulseConfig, week: str, window, reviews, llm, catalogue)
     return result
 
 
-def _compose_stage(cfg: PulseConfig, week: str, cluster, reviews, llm, catalogue) -> None:
+def _compose_stage(cfg: PulseConfig, week: str, cluster, reviews, llm, catalogue,
+                   summary: RunSummary, *, unavailable: list[str]) -> None:
     """Stages 5–6: compose quotes, summaries and actions; validate; render (§4.5, §4.6, §7)."""
     import time
 
@@ -382,6 +468,7 @@ def _compose_stage(cfg: PulseConfig, week: str, cluster, reviews, llm, catalogue
 
     runs = cfg.paths.runs_path
     engine = cfg.analysis.engine
+    summary.current_stage = "compose"
     before = Usage()
     if llm is not None:
         before.add(llm.usage)
@@ -406,12 +493,15 @@ def _compose_stage(cfg: PulseConfig, week: str, cluster, reviews, llm, catalogue
             "refusal_category": getattr(e, "category", None),
             **({"usage": _usage_since(llm.usage, before)} if llm is not None else {}),
         })
+        summary.fail("compose", str(e))
         typer.secho(f"  ✗ {e}", fg=typer.colors.RED, err=True)
         typer.secho(f"  nothing was published; see {path}", fg=typer.colors.RED, err=True)
         raise typer.Exit(ExitCode.LLM_FAILED if isinstance(e, LlmError)
                          else ExitCode.VALIDATION_FAILED) from e
 
+    result.pulse.unavailable_sources = list(unavailable)   # named in the source line
     paths = write_compose_artifacts(result, cfg, runs)
+    summary.word_count, summary.max_words = result.report.word_count, cfg.analysis.max_words
     seconds = round(time.monotonic() - started, 1)
     update_manifest(runs, week, "compose", {
         "status": "ok", "engine": engine, "attempts": len(result.attempts),
@@ -426,7 +516,10 @@ def _compose_stage(cfg: PulseConfig, week: str, cluster, reviews, llm, catalogue
     typer.echo(f"  wrote {paths['pulse_md']}, {paths['pulse_json'].name}, "
                f"{paths['validation'].name}")
     typer.echo("")
-    typer.echo(paths["pulse_md"].read_text(encoding="utf-8"))
+    if on_github_actions():   # public logs: the pulse quotes reviews; the summary is enough
+        typer.echo("  (the pulse text is not printed on GitHub Actions; see the run summary)")
+    else:
+        typer.echo(paths["pulse_md"].read_text(encoding="utf-8"))
 
 
 def _usage_since(now, before) -> dict:
@@ -446,58 +539,98 @@ def _usage_since(now, before) -> dict:
 
 
 ForceOpt = Annotated[bool, typer.Option(
-    "--force", help="Send the email again for a week that was already sent.")]
+    "--force", help="Deliberately re-publish: append the entry and send the email again.")]
+EmailOnlyOpt = Annotated[bool, typer.Option(
+    "--email-only", help="Send only the email, for a week whose entry is already in the Doc "
+                         "(the email failed after the append, e.g. on GitHub Actions). Never "
+                         "appends; refuses if the Doc has no entry for the week.")]
 
 
 @app.command()
-def publish(week: WeekOpt = None, force: ForceOpt = False, config: ConfigOpt = None) -> None:
+def publish(week: WeekOpt = None, force: ForceOpt = False, email_only: EmailOnlyOpt = False,
+            config: ConfigOpt = None) -> None:
     """Stage 7 from saved run artifacts: append the week to the Google Doc (PULSE_DOC_ID), then
     email it to PULSE_RECIPIENT. A week already published is skipped unless --force."""
-    _publish_stage(_load(config), _week_option(week), force=force)
+    if force and email_only:
+        raise typer.BadParameter("use either --force or --email-only, not both",
+                                 param_hint="--email-only")
+    summary = RunSummary("publish", week)
+    with _guarded(summary, show=True):
+        _publish_stage(_load(config), week, force=force, email_only=email_only,
+                       summary=summary)
 
 
-def _publish_stage(cfg: PulseConfig, week: str, *, force: bool = False) -> None:
+def _publish_stage(cfg: PulseConfig, week: str, *, summary: RunSummary, force: bool = False,
+                   email_only: bool = False) -> None:
     from pulse.manifest import update_manifest
     from pulse.publish.runner import PublishError, publish_path, publish_week
 
-    typer.echo(f"Publishing {week} through MCP (append to the Google Doc, then email "
-               f"{cfg.publish.recipient or 'PULSE_RECIPIENT'})…")
+    summary.current_stage = "publish"
+    recipient = cfg.publish.recipient
+
+    def shown(text: str) -> str:
+        """On GitHub Actions (public logs) the recipient's address is never printed, even
+        where a server error quotes it."""
+        return redact_recipient(text, recipient) if on_github_actions() else text
+
+    what = "send only the email to" if email_only else "append to the Google Doc, then email"
+    typer.echo(shown(f"Publishing {week} through MCP ({what} "
+                     f"{recipient or 'PULSE_RECIPIENT'})…"))
     try:
-        record = publish_week(cfg, week, force=force, echo=typer.echo)
+        record = publish_week(cfg, week, force=force, email_only=email_only,
+                              echo=lambda line: typer.echo(shown(line)))
     except PublishError as e:
         if e.record:
             update_manifest(cfg.paths.runs_path, week, "publish", _publish_summary(e.record))
-        typer.secho(f"  ✗ {e}", fg=typer.colors.RED, err=True)
+        hint = _publish_hint(e, week)
+        summary.fail("publish", redact_recipient(str(e), recipient))  # the summary never has it
+        summary.publish = e.record.get("status") or "failed"
+        summary.publish_detail = hint
+        typer.secho(shown(f"  ✗ {e}"), fg=typer.colors.RED, err=True)
         if e.record:
-            typer.secho(f"  {_publish_hint(e, week)}; see "
-                        f"{publish_path(cfg.paths.runs_path, week)}", fg=typer.colors.RED,
-                        err=True)
+            typer.secho(f"  {hint}; see {publish_path(cfg.paths.runs_path, week)}",
+                        fg=typer.colors.RED, err=True)
         raise typer.Exit(ExitCode.CONFIG_ERROR if e.setup and not e.record
                          else ExitCode.PUBLISH_FAILED) from e
     update_manifest(cfg.paths.runs_path, week, "publish", _publish_summary(record))
+    retries = len(record.get("retries", []))
+    retried = f", after {retries} {'retry' if retries == 1 else 'retries'}" if retries else ""
+    summary.publish = record["status"]
     if record["status"] == "skipped":       # not an error: the week is already out
+        summary.publish_detail = record.get("skip_reason", "already published") + retried
         typer.secho(f"Skipped {week}: {record.get('skip_reason', 'already published')} "
                     f"{record['doc_url']}", fg=typer.colors.YELLOW)
         return
+    summary.publish_detail = ("email only" if email_only
+                              else "Doc entry appended, email sent") + retried
     typer.secho(f"Published {week}: {record['doc_url']}", fg=typer.colors.GREEN)
 
 
 def _publish_hint(e, week: str) -> str:
     """What to do after a failed publish. A tool error comes from the server itself, so
-    running again only helps after the server (or its Google access or settings) is fixed."""
+    running again only helps after the server (or its Google access or settings) is fixed.
+    Once the entry is in the Doc, the way on is `--email-only`: it works on GitHub Actions too,
+    where publish.json is not kept."""
+    if e.hint:
+        return e.hint
+    appended = e.step in ("email_setup", "send")
     done = {"connect": "nothing was checked, appended or sent",
             "check": "nothing was appended or sent",
             "append": "nothing was appended or sent",
+            "email_setup": "the Doc entry was appended, but no email was sent",
             "send": "the Doc entry was appended, but no email was sent"}.get(e.step, "")
     done = f" ({done})" if done else ""
+    command = f"`pulse publish --week {week}" + (" --email-only`" if appended else "`")
     if e.server_tool:
         return (f"the MCP server's {e.server_tool!r} tool returned an error{done}: the server "
                 "(or its Google access or settings) needs fixing; running again will not help "
-                f"until then. After the fix, run `pulse publish --week {week}`")
+                f"until then. After the fix, run {command}")
     if e.setup:
         return (f"the MCP server does not offer the tools in tool_map.yaml{done}: fix the "
-                f"server or the tool map, then run `pulse publish --week {week}`")
-    return f"run `pulse publish --week {week}` again to resume{done}"
+                f"server or the tool map, then run {command}")
+    if appended:
+        return f"run {command} to send the email without appending again{done}"
+    return f"run {command} again to resume{done}"
 
 
 def _publish_summary(record: dict) -> dict:

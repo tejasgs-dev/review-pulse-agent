@@ -114,3 +114,5 @@ class Pulse:
     actions: list[ActionIdea]  # exactly 3
     general_praise_share: float = 0.0  # shown in the source line (§7.1)
     clustered_theme_count: int = 0     # themes found by clustering (5 or fewer)
+    # Sources whose fetch failed this week (§10 row 1): named in the source line.
+    unavailable_sources: list[str] = field(default_factory=list)

@@ -95,6 +95,14 @@ def tmp_config(tmp_path: Path):
 
 
 @pytest.fixture(autouse=True)
+def _not_on_github_actions(monkeypatch):
+    """CI runs these tests on GitHub Actions: behave as a local run unless a test sets these,
+    and never write to the real job summary."""
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_llm(request, monkeypatch):
     """Offline tests must never reach the real Claude API (it costs money). Tests that need a
     model patch `build_llm` with a fake; `@pytest.mark.slow` tests are exempt."""
@@ -161,12 +169,16 @@ def fake_mcp(monkeypatch):
 @pytest.fixture
 def publish_config(tmp_config, monkeypatch):
     """A config ready to publish: a recipient, the Doc ID and an API key, with the fake
-    server."""
+    server. Retries keep the default count but do not wait."""
     monkeypatch.setenv("PULSE_RECIPIENT", "me@example.com")
     monkeypatch.setenv("PULSE_MCP_API_KEY", "test-key-0123456789-0123456789-xyz")
     monkeypatch.setenv("PULSE_DOC_ID", TEST_DOC_ID)
 
     def make(mutate=None) -> Path:
-        return tmp_config(mutate)
+        def both(d):
+            d["mcp"]["retry_delay_seconds"] = 0
+            if mutate:
+                mutate(d)
+        return tmp_config(both)
 
     return make

@@ -61,6 +61,7 @@ def source_line(
     min_words: int,
     language: str = "en",
     general_praise_share: float | None = None,
+    unavailable: tuple[str, ...] | list[str] = (),
 ) -> str:
     """e.g. 'Source: 1,348 reviews (Play Store 1,201 · App Store 147), 9+ words,
     English only, 7 Sep – 15 Nov 2026 · 19% general praise'.
@@ -68,6 +69,8 @@ def source_line(
     Every source is listed, including one that returned nothing, so a missing store
     is visible to readers (edge case RND-02). The general-praise share is added when it
     is above 0, so a mostly negative pulse still shows how many reviewers were happy.
+    A source whose fetch failed this week is named at the end: '· Play Store unavailable this
+    week' (§10 row 1), so a count of 0 is never mistaken for "no complaints".
     """
     per_source = " · ".join(
         f"{SOURCE_LABELS.get(name, name)} {sources.get(name, 0):,}"
@@ -81,7 +84,15 @@ def source_line(
     )
     if general_praise_share:
         line += f" · {format_share(general_praise_share)} general praise"
+    if unavailable:
+        line += f" · {unavailable_note(unavailable)}"
     return line
+
+
+def unavailable_note(names: tuple[str, ...] | list[str]) -> str:
+    """'Play Store unavailable this week', for the source line and the run summary."""
+    labels = [SOURCE_LABELS.get(n, n) for n in names]
+    return f"{' and '.join(labels)} unavailable this week" if labels else ""
 
 
 def week_of(week: str) -> str:
@@ -140,7 +151,8 @@ def render_preamble(pulse: Pulse, *, product: str, min_words: int) -> str:
         header(product, pulse.week),
         source_line(review_count=pulse.review_count, sources=pulse.sources,
                     window=pulse.window, min_words=min_words,
-                    general_praise_share=pulse.general_praise_share),
+                    general_praise_share=pulse.general_praise_share,
+                    unavailable=pulse.unavailable_sources),
     ])
 
 

@@ -326,10 +326,10 @@ This document lists the inputs, states, and failures the system must handle on p
 | ORC-07 | `--skip-ingest` with an old `reviews.parquet` (weeks since the last ingest) | Warn if the newest review is older than the window end minus 7 days. | **Gap** |
 | ORC-08 | `--dry-run` | Makes no MCP connection and does not write `publish.json`. A test uses a fake MCP server that fails if it is ever called. | §4.8 |
 | ORC-09 | The same week is re-run with a different config (for example a new `weeks_back`) | Overwrites the artifacts. `manifest.json` records the new config. Earlier attempts can be kept as `manifest.{n}.json`. | §6 |
-| ORC-10 | `pulse prune` deletes raw files that a week still needs for replay | Prune only raw files older than 16 weeks. That week's `clean_reviews.jsonl` stays as the replay source. | §6 |
+| ORC-10 | ~~`pulse prune` deletes raw files that a week still needs for replay~~ | Not applicable: there is no prune command (nothing is kept between GitHub Actions runs; Phase 6). | §6 |
 | ORC-11 | The Windows console uses cp1252, so printing `★`, `₹`, or `—` raises `UnicodeEncodeError` | Reconfigure stdout and stderr to UTF-8 at CLI startup (or set `PYTHONIOENCODING=utf-8` in the scheduled task). | P0 `cli._utf8_console` |
 | ORC-12 | The scheduled task's working directory or path has spaces and `+` | Quote the paths in the Task Scheduler action. Set "Start in" to the repo root. | **Gap** |
-| ORC-13 | Exit codes | 0 for success; a different non-zero code for config error, ingest shortfall, LLM failure, validation failure, and publish failure. The scheduled `pulse doctor && pulse run` stops on the first failure. | P6 |
+| ORC-13 | Exit codes | 0 for success; a different non-zero code for config error, ingest shortfall, LLM failure, validation failure, and publish failure; 1 for an unexpected error. The scheduled `pulse doctor && pulse run` stops on the first failure. | P6 `cli.ExitCode` (table in README) |
 
 ---
 

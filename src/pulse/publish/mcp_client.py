@@ -55,6 +55,11 @@ class McpSetupError(RuntimeError):
     """The tool map or the server cannot be used: nothing is called."""
 
 
+class McpConnectError(McpSetupError):
+    """The server could not be reached (not healthy in time, connection refused or timed out).
+    Transient: worth retrying. A rejected API key is a plain McpSetupError."""
+
+
 class McpCallError(RuntimeError):
     """A tool call failed (error result, unexpected text, timeout, lost connection)."""
 
@@ -66,6 +71,14 @@ class McpToolError(McpCallError):
     def __init__(self, tool: str, message: str) -> None:
         super().__init__(message)
         self.tool = tool
+
+
+def is_transient(e: BaseException) -> bool:
+    """A failure that may pass on its own: no connection, a timeout, a lost connection. A tool
+    error or a setup problem (tool map, missing or rejected key) is not."""
+    if isinstance(e, McpToolError):
+        return False
+    return isinstance(e, (McpConnectError, McpCallError))
 
 
 def mcp_error(exc: BaseException) -> McpSetupError | McpCallError | None:
@@ -253,7 +266,7 @@ def wait_until_healthy(server: McpServerConfig, *, sleep=time.sleep, clock=time.
             except httpx.HTTPError as e:
                 last = type(e).__name__
             if clock() >= deadline:
-                raise McpSetupError(f"MCP server is not healthy at {server.health_url} after "
+                raise McpConnectError(f"MCP server is not healthy at {server.health_url} after "
                                     f"{server.wake_timeout_seconds:.0f}s ({last})")
             sleep(5)
     finally:
@@ -317,9 +330,11 @@ async def open_client(server: McpServerConfig) -> AsyncIterator[Any]:
     except BaseException as e:  # noqa: BLE001 — transports raise exception groups
         if connected or not isinstance(e, Exception):
             raise
-        raise McpSetupError(_connect_message(server, e)) from e
+        message = _connect_message(server, e)
+        rejected = "rejected the API key" in message       # retrying will not fix the key
+        raise (McpSetupError if rejected else McpConnectError)(message) from e
     if scope.cancelled_caught and not connected:
-        raise McpSetupError(f"the MCP server at {describe(server)} did not answer within "
+        raise McpConnectError(f"the MCP server at {describe(server)} did not answer within "
                             f"{server.connect_timeout_seconds:.0f}s")
 
 

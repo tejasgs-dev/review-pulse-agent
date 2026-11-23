@@ -261,6 +261,10 @@ class McpConfig(_Strict):
     docs: McpServerConfig
     gmail: McpServerConfig
     tool_map: str
+    # Publishing retries a lost connection or a timeout this many times, waiting
+    # retry_delay_seconds and doubling it each time, wherever that cannot publish twice.
+    retries: int = Field(default=2, ge=0, le=5)
+    retry_delay_seconds: float = Field(default=10, ge=0)
 
     @property
     def tool_map_path(self) -> Path:

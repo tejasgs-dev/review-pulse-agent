@@ -15,16 +15,26 @@ on GitHub Actions, where runs/ is not kept.
 `runs/{week}/publish.json` (rewritten after every step) adds resuming: if this machine
 appended the entry but the email failed, the next run sends the email without appending again
 (the marker is in the Doc, but nothing was sent). On Actions, where publish.json is not kept,
-such a week counts as published; `--force` sends it.
+such a week counts as published; `--email-only` sends just the email (it checks that the
+entry is in the Doc and never appends).
+
+Retries (§10). A connection failure or a timeout is retried up to `mcp.retries` times with
+exponential backoff (`mcp.retry_delay_seconds`, doubled each time), and only where a retry
+cannot publish twice: while connecting and checking; after an append that timed out (the retry
+checks the Doc first: if the marker is there now, that was this run's entry and only the email
+is sent); and while connecting for the email. The send itself is never retried, because the
+email may have gone out, and a tool error (the server answered with an error) is never retried:
+running again does not help until the server is fixed.
 
 `--force` deliberately re-publishes: the entry is appended again and the email is sent again,
-whatever the Doc or publish.json says.
+whatever the Doc or publish.json says. A forced run is only retried before its append.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +52,7 @@ from pulse.publish.mcp_client import (
     McpSetupError,
     McpToolError,
     describe,
+    is_transient,
     load_tool_map,
     verified_caller,
 )
@@ -55,12 +66,13 @@ class PublishError(RuntimeError):
 
     def __init__(self, message: str, *, record: dict[str, Any] | None = None,
                  setup: bool = False, server_tool: str | None = None,
-                 step: str | None = None) -> None:
+                 step: str | None = None, hint: str | None = None) -> None:
         super().__init__(message)
         self.record = record or {}
         self.setup = setup
         self.server_tool = server_tool   # the MCP tool that reported an error, if one did
-        self.step = step                 # connect | check | append | send
+        self.step = step                 # connect | check | append | email_setup | send
+        self.hint = hint                 # what to do next, when the CLI's default is wrong
 
 
 def publish_path(runs_dir: Path, week: str) -> Path:
@@ -107,10 +119,29 @@ def load_artifacts(runs_dir: Path, week: str) -> dict[str, str]:
     return {"doc": doc, "subject": email["subject"], "body": email["body"]}
 
 
-def publish_week(cfg: PulseConfig, week: str, *, force: bool = False,
-                 echo: Echo = lambda _m: None) -> dict[str, Any]:
+def _can_retry(e: Exception, step: str, record: dict[str, Any]) -> bool:
+    """Retry only a transient failure, and only where retrying cannot publish twice."""
+    if not is_transient(e):
+        return False
+    if step in ("connect", "check"):
+        return True
+    if record["forced"]:          # a forced run appends whatever the Doc says: never twice
+        return False
+    if step == "append":          # the retry checks the Doc before appending again
+        return not record["email_only"]
+    return step == "email_setup"  # nothing was sent yet; "send" may have gone out
+
+
+def publish_week(cfg: PulseConfig, week: str, *, force: bool = False, email_only: bool = False,
+                 echo: Echo = lambda _m: None,
+                 sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
     """Publish one week. Returns the publish.json record (status "sent", or "skipped" when the
-    week was already published); raises PublishError on failure."""
+    week was already published); raises PublishError on failure.
+
+    `email_only`: send just the email for a week whose entry is already in the Doc; refused if
+    the Doc has no entry for the week."""
+    if force and email_only:
+        raise PublishError("--force and --email-only cannot be combined", setup=True)
     runs = cfg.paths.runs_path
     art = load_artifacts(runs, week)
     if not cfg.publish.doc_id:
@@ -135,7 +166,8 @@ def publish_week(cfg: PulseConfig, week: str, *, force: bool = False,
     record: dict[str, Any] = {
         "week": week, "heading": week_heading(week), "marker": marker,
         "doc_id": cfg.publish.doc_id, "doc_url": cfg.publish.doc_url, "started_at": _now(),
-        "status": "running", "forced": force, "duplicate_check": None,
+        "status": "running", "forced": force, "email_only": email_only,
+        "duplicate_check": None,
         "servers": {"docs": describe(cfg.mcp.docs), "gmail": describe(cfg.mcp.gmail)},
         # The earlier run's entries, kept until a step of this run actually replaces them, so a
         # failed check (or connection) never loses what was already published.
@@ -158,19 +190,45 @@ def publish_week(cfg: PulseConfig, week: str, *, force: bool = False,
         write_json(path, {k: v for k, v in record.items() if not k.startswith("_")})
 
     save()
-    try:
-        anyio.run(_publish, cfg, tool_map, art, doc_text, record, save, echo)
-    except BaseException as exc:
-        e = mcp_client.mcp_error(exc)
-        if e is None:
-            save("failed")
-            raise
-        step = record["_step"]
-        record["failed_step"] = step
-        save("partial" if step == "send" else "failed")   # send: the entry is in the Doc
-        raise PublishError(str(e), record=record, setup=isinstance(e, McpSetupError),
-                           server_tool=e.tool if isinstance(e, McpToolError) else None,
-                           step=step) from e
+    retries, delay = cfg.mcp.retries, cfg.mcp.retry_delay_seconds
+    attempt = 0
+    while True:
+        try:
+            anyio.run(_publish, cfg, tool_map, art, doc_text, record, save, echo)
+            break
+        except BaseException as exc:
+            e = mcp_client.mcp_error(exc)
+            if e is None:
+                save("failed")
+                raise
+            step = record["_step"]
+            if attempt < retries and _can_retry(e, step, record):
+                wait = delay * 2 ** attempt
+                attempt += 1
+                record.setdefault("retries", []).append(
+                    {"step": step, "error": str(e)[:300], "at": _now()})
+                if step == "append":
+                    # The append may have landed before the timeout. The retry checks the Doc
+                    # first, and the marker there now can only be this run's entry.
+                    record["_appended_here"] = True
+                save()
+                echo(f"  ! {e}: retrying in {wait:g}s (retry {attempt} of {retries})")
+                sleep(wait)
+                continue
+            record["failed_step"] = step
+            # After the append (email_setup, send) the entry is in the Doc: a partial publish.
+            save("partial" if step in ("email_setup", "send") else "failed")
+            raise PublishError(str(e), record=record, setup=isinstance(e, McpSetupError),
+                               server_tool=e.tool if isinstance(e, McpToolError) else None,
+                               step=step) from e
+    if record.get("_missing_entry"):
+        record["failed_step"] = "check"
+        save("failed")
+        raise PublishError(
+            f"--email-only: the Doc has no entry for {week} ({marker}), so there is nothing to "
+            "email a link to", record=record, step="check",
+            hint=f"run `pulse publish --week {week}` (without --email-only) to append the entry "
+                 "and send the email")
     save(record["status"] if record["status"] == "skipped" else "sent")
     return record
 
@@ -194,6 +252,7 @@ async def _publish(cfg: PulseConfig, tool_map, art, doc_text, record, save,
         if same_server:
             await _email_step(docs_client, cfg, tool_map, art, record, save, echo)
     if not same_server:
+        record["_step"] = "email_setup"
         async with mcp_client.open_client(cfg.mcp.gmail) as gmail_client:
             await _email_step(gmail_client, cfg, tool_map, art, record, save, echo)
 
@@ -225,12 +284,25 @@ async def _doc_step(docs, cfg: PulseConfig, doc_text, record, save, echo: Echo) 
         raise
     record["duplicate_check"] = "doc_contains_text"
     record["check"] = {"status": "ok", "found": present, "at": _now()}
+    if record["email_only"]:
+        if not present:
+            record["_missing_entry"] = True       # publish_week refuses; nothing is sent
+            return False
+        echo(f"  --email-only: {marker} is in the Doc; sending only the email")
+        if record["doc"].get("status") != "ok":
+            record["doc"] = {"status": "present", "at": _now()}
+        save()
+        return True
     if not record["forced"]:
         if present and not resume:
             return _skip(record, save, echo, f"{marker} is in the Doc")
         if present and resume:
-            echo("  Doc entry already appended by the last run: only the email is sent")
-            record["doc"] = {**record["doc"], "resumed_at": _now()}
+            echo("  Doc entry already appended: only the email is sent")
+            if record["doc"].get("status") == "ok":
+                record["doc"] = {**record["doc"], "resumed_at": _now()}
+            else:   # a retry after an append that timed out: the entry did land
+                record["doc"] = {"status": "ok", "action": "appended",
+                                 "confirmed_by": "doc_contains_text", "at": _now()}
             save()
             return True
     record["_step"] = "append"
@@ -244,6 +316,7 @@ async def _doc_step(docs, cfg: PulseConfig, doc_text, record, save, echo: Echo) 
         raise
     record["doc"] = {"status": "ok", "action": "appended", "doc_title": r.title,
                      "chars": r.chars, "content_sha256": _sha(doc_text), "at": _now()}
+    record["_appended_here"] = True     # a retry from here on sends only the email
     save()
     echo(f"  Doc entry '{record['heading']}' appended: {cfg.publish.doc_url}")
     return True
@@ -251,6 +324,7 @@ async def _doc_step(docs, cfg: PulseConfig, doc_text, record, save, echo: Echo) 
 
 async def _email_step(client, cfg: PulseConfig, tool_map, art, record, save,
                       echo: Echo) -> None:
+    record["_step"] = "email_setup"
     gmail = await verified_caller(client, tool_map, "gmail", cfg.mcp.gmail)
     to = cfg.publish.recipient
     record["_step"] = "send"

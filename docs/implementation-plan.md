@@ -411,25 +411,29 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 
 **Goal:** runs that are safe to repeat, can resume, and are observable. *(§4.8, §6, §10)*
 
+**Status (2026-11-23):** done for unattended GitHub Actions runs. Two items are deferred to later (marked below); neither blocks Phase 7.
+
 ### Tasks
-- [ ] `orchestrator.py`: each stage reads the previous stage's saved artifacts, so `--skip-ingest` and stage-level re-runs work.
-- [ ] `manifest.json`: config snapshot, git SHA, engine, model IDs and revisions, prompt versions (LLM engine), per-source counts, token usage (LLM engine), timings, and status for each stage.
-- [ ] Implement every failure behavior in §10:
-  - [ ] A source fails → continue and record it; stop if fewer than `min_reviews` (default 50).
-  - [ ] *(LLM engine)* Backoff at the stage level on top of the SDK's own retries.
-  - [ ] *(LLM engine)* Log the refusal category and stop the stage cleanly.
+- [x] ~~`orchestrator.py`~~ *Not needed.* Each stage already reads the previous stage's saved artifacts from `cli.py`: `analyze` reads `data/reviews.parquet`, `publish` reads `runs/{week}/`, and `--skip-ingest` works. A separate module would only move code.
+- [ ] `manifest.json` *(partly done)*: each stage writes its own section (ingest counts and status per source, scrub, cluster engine/model/revision/prompt versions/usage/timings, compose, publish).
+  - [ ] **Later (G7):** config snapshot, git SHA, `pulse` version, ingest and scrub timings, an overall run status and exit code.
+- [x] Implement every failure behavior in §10:
+  - [x] A source fails → continue and record it; stop if fewer than `min_reviews` (default 50). The pulse source line and the run summary say "Play Store unavailable this week"; if every source fails, `pulse run` stops at ingest with exit 5 (`cli.run`, `render.markdown.source_line`, `Pulse.unavailable_sources`).
+  - [x] Retries with backoff for network calls: review feeds (3 retries, built in Phase 1), MCP connect/check/append-confirm/email-setup (`mcp.retries`, `mcp.retry_delay_seconds`; `publish.runner._can_retry`), and the embedding model download (2 retries; `Model2VecEmbedder`). The send itself and tool errors are never retried.
+  - [ ] **Later (G8):** *(LLM engine)* backoff at the stage level on top of the SDK's own retries (`LlmError.retryable` is set but not used yet).
+  - [x] *(LLM engine)* Log the refusal category and stop the stage cleanly (`LlmRefusal`; `refusal_category` in the manifest; exit 9).
   - [x] *(Local engine)* Missing embedding model with no network: a clear error naming `analysis.local.model` (`LocalEngineError`, built with Phase 3).
-  - [ ] Partial publish → resume.
-- [ ] Clear CLI exit codes (0 for success, a non-zero code per failure class) and readable summaries.
-- [ ] `pulse prune`: remove raw files older than 16 weeks.
-- [ ] A README with setup, MCP server installation and authentication, configuration, commands, and troubleshooting.
+  - [x] Partial publish → resume: locally from `publish.json`; on GitHub Actions (nothing kept) with `pulse publish --email-only`, which checks the entry is in the Doc and never appends.
+- [x] Clear CLI exit codes (0 for success, a non-zero code per failure class, 1 for an unexpected error with its traceback) and a readable summary at the end of `pulse run` and `pulse publish`, also written to `$GITHUB_STEP_SUMMARY` (`cli.ExitCode`, `cli._guarded`, `summary.py`). The summary holds no review text, recipient or Doc link.
+- [x] ~~`pulse prune`~~ *Not needed:* nothing is kept between GitHub Actions runs.
+- [x] A README with setup, MCP server connection and authentication, configuration, commands, exit codes, GitHub Actions notes, and troubleshooting.
 
 ### Deliverables
-- A hardened CLI, the README, and complete run manifests.
+- A hardened CLI, the README, and complete run manifests (manifest additions deferred: G7).
 
 ### Exit criteria
-- A simulated failure test for each row of §10 behaves as specified.
-- Two identical runs in a row produce one Doc entry, one email, and stable artifacts.
+- [x] A simulated failure test for each row of §10 behaves as specified (`tests/test_reliability.py`, with `test_publish.py`, `test_cli.py`, `test_llm*.py`, `test_local_cluster.py`).
+- [x] Two identical runs in a row produce one Doc entry, one email, and stable artifacts (`test_two_identical_runs_publish_once`).
 
 ---
 

@@ -23,6 +23,7 @@ during clustering, and ties broken by ID. No review text leaves the machine.
 from __future__ import annotations
 
 import re
+import time
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -104,7 +105,11 @@ def model_is_cached(cfg: PulseConfig) -> bool:
 class Model2VecEmbedder:
     """model2vec static embeddings, pinned by revision and cached in data/models/."""
 
-    def __init__(self, local: LocalEngineConfig, cache_dir: Path) -> None:
+    DOWNLOAD_RETRIES = 2          # after the first try; waits 5s, then 10s
+    DOWNLOAD_DELAY_SECONDS = 5.0
+
+    def __init__(self, local: LocalEngineConfig, cache_dir: Path, *,
+                 sleep=time.sleep) -> None:
         from huggingface_hub import snapshot_download
         from model2vec import StaticModel
 
@@ -113,14 +118,21 @@ class Model2VecEmbedder:
             path = snapshot_download(local.model, revision=local.model_revision,
                                      cache_dir=str(cache_dir), local_files_only=True)
         except Exception:  # noqa: BLE001 - any cache miss means "try the network"
-            try:
-                path = snapshot_download(local.model, revision=local.model_revision,
-                                         cache_dir=str(cache_dir))
-            except Exception as e:  # noqa: BLE001
-                raise LocalEngineError(
-                    f"embedding model {local.model} (revision {local.model_revision[:7]}) is "
-                    f"not cached in {cache_dir} and could not be downloaded: {e}. Check the "
-                    "network, or analysis.local.model / model_revision in pulse.yaml") from e
+            path = None
+            for attempt in range(self.DOWNLOAD_RETRIES + 1):
+                try:
+                    path = snapshot_download(local.model, revision=local.model_revision,
+                                             cache_dir=str(cache_dir))
+                    break
+                except Exception as e:  # noqa: BLE001 - network, hub or disk: retry, then stop
+                    if attempt < self.DOWNLOAD_RETRIES:
+                        sleep(self.DOWNLOAD_DELAY_SECONDS * 2 ** attempt)
+                        continue
+                    raise LocalEngineError(
+                        f"embedding model {local.model} (revision {local.model_revision[:7]}) "
+                        f"is not cached in {cache_dir} and could not be downloaded after "
+                        f"{self.DOWNLOAD_RETRIES + 1} attempts: {e}. Check the network, or "
+                        "analysis.local.model / model_revision in pulse.yaml") from e
         self._model = StaticModel.from_pretrained(path, force_download=False)
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
