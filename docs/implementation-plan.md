@@ -444,6 +444,8 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 ### Tasks
 - [ ] Set up the scheduler: Windows Task Scheduler (Mondays 09:00 IST, running `pulse doctor && pulse run`), or a scheduled GitHub Actions workflow.
 - [ ] Compute the run week as the ISO week that just ended (Monday–Sunday, IST).
+- [ ] Name the scheduled workflow file **exactly** `.github/workflows/pulse-check.yml` (display name "Pulse check"). The website's "Pulse check" button links to `https://github.com/tejasgs-dev/review-pulse-agent/actions/workflows/pulse-check.yml`, and its "System status" panel shows that file's status badge (`…/pulse-check.yml/badge.svg`); both show "not set up" until the file exists.
+- [ ] After each successful published run, run `pulse export-site --week <W>` and commit `site/pulses/` so the website shows the new week (only the allowlisted pulse data; architecture §6 exception).
 - [ ] Do **3 consecutive live weekly runs**. For each one:
   - [ ] A human check against the `problemStatement.md` §4 checklist.
   - [ ] Feedback from Product, Support, and Leadership readers: is it scannable, are the themes useful, can the actions be acted on?

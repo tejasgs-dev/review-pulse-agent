@@ -766,5 +766,33 @@ def doctor(
         raise typer.Exit(ExitCode.DOCTOR_FAILED)
 
 
+@app.command("export-site")
+def export_site(
+    week: WeekOpt = None,
+    config: ConfigOpt = None,
+    out: Annotated[Path | None, typer.Option(
+        "--out", help="Where to write the site JSON (default: site/pulses).")] = None,
+) -> None:
+    """Write the week's validated pulse (themes, 3 quotes, 3 actions, counts) to site/pulses/
+    for the static website, and add it to site/pulses/index.json. Never copies raw reviews."""
+    from pulse.site_export import (
+        DEFAULT_SITE_PULSES,
+        ExportRefusedError,
+        MissingPulseError,
+        export_week,
+    )
+
+    cfg = _load(config)
+    try:
+        target = export_week(cfg, week, out or DEFAULT_SITE_PULSES)
+    except MissingPulseError as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(ExitCode.CONFIG_ERROR) from e
+    except ExportRefusedError as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(ExitCode.VALIDATION_FAILED) from e
+    typer.echo(f"Wrote {target} and updated {target.parent / 'index.json'}")
+
+
 if __name__ == "__main__":
     app()

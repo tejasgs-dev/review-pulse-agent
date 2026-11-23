@@ -21,6 +21,7 @@ By default the analysis is **free and runs on your machine**: themes come from s
 - [Commands](#commands)
 - [Exit codes](#exit-codes)
 - [Running on GitHub Actions](#running-on-github-actions)
+- [Website](#website)
 - [Troubleshooting](#troubleshooting)
 
 ## Setup
@@ -105,6 +106,7 @@ pulse ingest   [--source play_store|app_store|all] [--week ...] [--full]
 pulse analyze  [--week ...] [--engine local|llm]
 pulse publish  [--week ...] [--force | --email-only]
 pulse doctor   [--live | --offline]
+pulse export-site [--week ...] [--out site/pulses]
 pulse --version
 ```
 
@@ -119,6 +121,7 @@ pulse --version
 | `pulse publish --force` | Deliberately re-publishes: appends again and emails again. |
 | `pulse publish --email-only` | Sends only the email, for a week whose entry is already in the Doc. Refuses if it is not there. |
 | `pulse doctor` | Checks config, `.env` values, the theme catalogue or API key, and (with `--live`, the default) the MCP server and its tools. |
+| `pulse export-site` | Writes a validated week's pulse data for the website to `site/pulses/{week}.json` and adds it to `site/pulses/index.json`. Allowlisted fields only (see [Website](#website)). |
 
 `--week` defaults to the ISO week that just ended (Monday–Sunday, IST).
 
@@ -167,6 +170,33 @@ The scheduled workflow itself is set up in Phase 7. What it needs from this repo
 - **Cache `data/models/`** (keyed on `analysis.local.model_revision`), so the embedding model is not downloaded every week. The download is retried twice if it is.
 - **Nothing is kept between runs.** Each run backfills the whole review window, and `publish.json` is gone afterwards: the Doc marker stops a second publish, and `pulse publish --email-only` sends a missed email. Do not upload `runs/` or `data/` as workflow artifacts in a public repository: they hold review text.
 - **Public logs.** In a public repository anyone can read Actions logs. When `GITHUB_ACTIONS` is set, `pulse run` does not print the composed pulse (it is still in the Doc and the email), and the recipient's address is replaced by `PULSE_RECIPIENT` in every line (in any letter case), including server errors that quote it, config errors about an invalid `PULSE_RECIPIENT`, and unexpected errors with their tracebacks. The end-of-run summary never holds review text, the recipient or the Doc link.
+
+## Website
+
+`site/` is a static, read-only website for the pulses: **Dashboard** (latest week, with a week selector), **Past weeks** and **How it works**. It is plain HTML, CSS and JavaScript, with no build step, no backend and no secrets. The design came from Google Stitch; that export is kept in `site/stitch-export/` as a reference only.
+
+**Data.** The pages read `site/pulses/index.json` and `site/pulses/{week}.json`, which `pulse export-site --week <W>` writes from `runs/<W>/`. These files are committed. They hold counts, theme labels and shares, the top-3 summaries, the three quotes (theme, text, rating, store) and the three actions, and nothing else: no review IDs, no keywords, no other review text (architecture §6, written exception). The export refuses a week that failed validation and re-scans every text field for PII.
+
+```bash
+pulse export-site --week 2026-W46
+git add site/pulses && git commit -m "Add the 2026-W46 pulse to the site"
+```
+
+**Buttons.** *Pulse check* opens the `pulse-check.yml` GitHub Actions workflow in a new tab (the workflow is added in Phase 7). *System status* checks the MCP server's `GET /healthz` for up to 90 seconds ("Checking…", then "Waking up…", then "Online" or "Offline"), and shows the workflow's status badge and the latest published week. The browser can only read `/healthz` if the server sends `Access-Control-Allow-Origin` on that route.
+
+**Preview locally.**
+
+```bash
+python -m http.server 8000 --directory site    # then open http://localhost:8000
+```
+
+**Hosting on Render (Static Site).**
+
+1. In Render, choose **New → Static Site** and connect `tejasgs-dev/review-pulse-agent`.
+2. Branch: `main`. Root directory: leave empty. Build command: leave empty (or `true` if Render requires one). **Publish directory: `site`**.
+3. No environment variables are needed.
+4. Create the site. Every push to `main` redeploys it, so a committed `pulse export-site` shows up within a minute or two.
+5. Optional: under **Redirects/Rewrites**, nothing is needed (the pages are plain files). Under **Headers**, you can add `Cache-Control: no-cache` for `/pulses/*` so a new week shows immediately.
 
 ## Troubleshooting
 

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How it works · ReviewPulse</title>
+<meta name="description" content="How ReviewPulse turns app reviews into a one-page weekly pulse.">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://github.com https://*.githubusercontent.com; connect-src 'self' https://gworkspace-mcp.onrender.com; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap">
+<link rel="stylesheet" href="assets/styles.css">
+<script src="assets/app.js" defer></script>
+</head>
+<body data-page="how">
+<header id="topbar"></header>
+<main id="content">
+  <div class="page-head">
+    <div>
+      <h1>How it works</h1>
+      <p>From raw app reviews to a one-page weekly pulse, every week.</p>
+    </div>
+  </div>
+
+  <section class="card" aria-label="Pipeline">
+    <ol class="flow">
+      <li class="step">
+        <span class="step-icon" data-icon="download"></span>
+        <span class="step-num">STEP 1</span>
+        <h3>App reviews</h3>
+        <p>Public reviews are collected from the Play Store and App Store.</p>
+      </li>
+      <li class="step">
+        <span class="step-icon" data-icon="shield"></span>
+        <span class="step-num">STEP 2</span>
+        <h3>Filter &amp; PII scrub</h3>
+        <p>Short, non-English and duplicate reviews are dropped, and emails, phone numbers and other personal details are removed.</p>
+      </li>
+      <li class="step">
+        <span class="step-icon" data-icon="cluster"></span>
+        <span class="step-num">STEP 3</span>
+        <h3>ML theme clustering</h3>
+        <p>Reviews are turned into embeddings and grouped into up to five themes, like "Customer support".</p>
+      </li>
+      <li class="step">
+        <span class="step-icon" data-icon="note"></span>
+        <span class="step-num">STEP 4</span>
+        <h3>Weekly pulse</h3>
+        <p>The top 3 themes, three real quotes and three action ideas are written into a one-page note.</p>
+      </li>
+      <li class="step">
+        <span class="step-icon" data-icon="server"></span>
+        <span class="step-num">STEP 5</span>
+        <h3>MCP server</h3>
+        <p>A small server receives the pulse and handles publishing to Google.</p>
+      </li>
+      <li class="step">
+        <span class="step-icon" data-icon="send"></span>
+        <span class="step-num">STEP 6</span>
+        <h3>Google Doc + Email</h3>
+        <p>The pulse is added to a shared Google Doc and sent as an email.</p>
+        <span class="forks"><span class="chip">Google Doc</span><span class="chip">Email</span></span>
+      </li>
+    </ol>
+  </section>
+
+  <div class="grid grid-3 section">
+    <div class="card fact">
+      <span class="fact-icon" data-icon="repeat"></span>
+      <h3>Runs weekly</h3>
+      <p>Each week, a GitHub Actions workflow runs the whole pipeline end to end.</p>
+    </div>
+    <div class="card fact">
+      <span class="fact-icon" data-icon="shield"></span>
+      <h3>Privacy first</h3>
+      <p>Personal details are scrubbed before any analysis, and checked again before anything is published.</p>
+    </div>
+    <div class="card fact">
+      <span class="fact-icon" data-icon="quote"></span>
+      <h3>Grounded</h3>
+      <p>Every quote is an exact excerpt from a real review.</p>
+    </div>
+  </div>
+
+  <section class="card section" aria-labelledby="built-with">
+    <h2 id="built-with">Built with</h2>
+    <div class="tech">
+      <span><i data-icon="code"></i>Python</span>
+      <span><i data-icon="cluster"></i>model2vec + k-means</span>
+      <span><i data-icon="plug"></i>MCP</span>
+      <span><i data-icon="cloud"></i>Render</span>
+      <span><i data-icon="play"></i>GitHub Actions</span>
+    </div>
+  </section>
+</main>
+<footer id="footer"></footer>
+</body>
+</html>

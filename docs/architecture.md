@@ -368,6 +368,7 @@ runs/{iso_week}/
 ```
 
 - `data/` and `runs/` are **git-ignored**. Even scrubbed review text stays out of version control.
+- **Written exception: the website's pulse data (`site/pulses/`).** `pulse export-site --week <W>` writes `site/pulses/{week}.json` and `site/pulses/index.json`, which are committed and served by the public website. The only review text allowed there is **the three quotes of a published pulse**: a pulse that passed validation (§4.6), whose quotes are exact, PII-scanned excerpts and already appear in the Doc and the email. The export copies an explicit allowlist of fields (counts per store, theme labels and shares, the "other" share, top-3 summaries, the 3 quotes with theme, rating and store, the 3 actions). It never copies review IDs, quote spans, theme keywords, per-review assignments, the email body, or anything from `data/` or `clean_reviews.jsonl`. It refuses a week that failed validation and re-runs the PII scanner on every text field before writing. `tests/test_site_export.py` also checks the committed files against the allowlist. Nothing else from `runs/` may be committed.
 - Retention: no prune command. Scheduled runs happen on GitHub Actions, where nothing is kept between runs (the embedding model in `data/models/` is cached by the workflow). On a local machine, delete old `data/raw/` files by hand if they pile up.
 
 ---
@@ -531,6 +532,7 @@ review-pulse-agent/
 │   │   └── validate.py
 │   ├── render/
 │   │   └── markdown.py           # Pulse → Doc text / email text
+│   ├── site_export.py            # `pulse export-site`: allowlisted site JSON
 │   └── publish/
 │       ├── mcp_client.py
 │       ├── docs_publisher.py
@@ -543,6 +545,11 @@ review-pulse-agent/
 │   ├── test_validate.py
 │   ├── test_rank.py
 │   └── test_publish_mcp.py       # runs against a fake MCP server
+├── site/                         # static website (Render Static Site, publish dir site/)
+│   ├── index.html, weeks.html, how.html
+│   ├── assets/                   # styles.css, app.js
+│   ├── pulses/                   # written by `pulse export-site`; committed (§6 exception)
+│   └── stitch-export/            # Google Stitch design reference only; not loaded by the site
 ├── data/   (git-ignored)
 ├── runs/   (git-ignored)
 ├── .env.example
@@ -580,6 +587,7 @@ review-pulse-agent/
 - **Secrets:** environment variables or `.env` only. `.env.example` documents the variable names without values.
 - **Store compliance:** nothing behind a login is ever read. The App Store feed is a public feed. The Play Store listing reader was approved by the project owner for this course project (§13 #2); it is public-only, throttled, bounded by the window and `max_reviews`, and can be switched off (`ingest.play_public.enabled: false`) to fall back to export files.
 - **Logs:** LLM request and response logs (LLM engine only) hold scrubbed text only and stay in git-ignored `runs/`.
+- **Website:** `site/` is a static site with no secrets and no backend. Its only review text is the three quotes per published week (§6, written exception). Its "System status" check calls the MCP server's public `/healthz` route, which needs no API key and touches no Google API.
 
 ---
 

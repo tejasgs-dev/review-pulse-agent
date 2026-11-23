@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "latest": "2026-W46",
+  "weeks": [
+    {
+      "week": "2026-W46",
+      "week_label": "Week of 9 Nov 2026",
+      "window": {
+        "start": "2026-09-07",
+        "end": "2026-11-15"
+      },
+      "review_count": 1348,
+      "general_praise_share": 0.24183976261127596,
+      "top_theme": {
+        "label": "Customer support",
+        "share": 0.16172106824925817
+      }
+    }
+  ]
+}
