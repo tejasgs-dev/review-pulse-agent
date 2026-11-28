@@ -64,6 +64,15 @@ TYPICAL_QUOTE_WORDS = 25       # budget estimate before any quote is picked
 PLACEHOLDERS = ("recent_count", "trend")
 _PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
 _DIGIT = re.compile(r"\d")
+# In an action or signal, a figure written as words: an invented target such as "within one
+# business day" or "two hours". "Two weeks" is allowed: it is the 14-day window that every
+# signal is measured on.
+_NUMBER_WORD_TARGET = re.compile(
+    r"\b(?:a|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|"
+    r"thirty|forty|fifty|hundred|thousand|lakh|crore|half|a few|several|dozen)\s+"
+    r"(?:business\s+|working\s+|calendar\s+)?"
+    r"(?:seconds?|minutes?|mins?|hours?|hrs?|days?|months?|years?|percent|per\s*cent|"
+    r"rupees?|rs|inr|lakhs?|crores?)\b", re.I)
 
 
 # ---------------------------------------------------------------------------- schema
@@ -172,6 +181,9 @@ def raw_number_issues(writing: HybridWriting, contexts: Sequence[ThemeContext]) 
             if _DIGIT.search(_PLACEHOLDER.sub("", text)):
                 issues.append(f"the {field} of {t.theme_id} contains a digit; never type "
                               "numbers, use {recent_count} or {trend}")
+            if field != "summary" and (m := _NUMBER_WORD_TARGET.search(text)):
+                issues.append(f"the {field} of {t.theme_id} invents a figure "
+                              f"(\"{m.group(0)}\"); no deadlines, time limits or amounts")
             for name in _PLACEHOLDER.findall(text):
                 if field == "summary":
                     issues.append(f"the summary of {t.theme_id} uses {{{name}}}; summaries use "

@@ -301,3 +301,22 @@ def test_without_the_name_the_same_review_is_sampled(setup, monkeypatch):
     victim = contexts[0].members[0]
     safe_samples(contexts, setup.cluster, setup.reviews, setup.cfg, setup.catalogue)
     assert any(r.id == victim.id for r in contexts[0].candidates)
+
+
+def test_invented_targets_in_words_are_rejected():
+    """'within one business day' is a figure the ML never produced; 'two weeks' is the window."""
+    def theme(**kw):
+        base = {"summary": "s", "action": "a", "signal": "fewer than {recent_count} in the next "
+                                                       "two weeks"}
+        return HybridTheme(theme_id="t", quote=QuoteRef(review_id="r1", first_sentence=1,
+                                                        last_sentence=1), **{**base, **kw})
+
+    ctx = [SimpleNamespace(id="t")]
+    for action in ("Reply to every ticket within one business day", "Answer within two hours",
+                   "Refund five rupees per failed order"):
+        issues = raw_number_issues(HybridWriting(themes=[theme(action=action)]), ctx)
+        assert any("invents a figure" in i for i in issues), action
+    fine = [theme(), theme(summary="The app crashes several times a day for some reviewers"),
+            theme(action="Give support one place to track every open ticket")]
+    for t in fine:
+        assert raw_number_issues(HybridWriting(themes=[t]), ctx) == []
