@@ -81,15 +81,17 @@ ConfigOpt = Annotated[
 
 
 def _engine_option(value: str | None) -> str | None:
-    if value is not None and value not in ("local", "llm"):
-        raise typer.BadParameter("must be local or llm")
+    if value is not None and value not in ("local", "hybrid", "llm"):
+        raise typer.BadParameter("must be local, hybrid or llm")
     return value
 
 
 EngineOpt = Annotated[
     str | None,
     typer.Option("--engine", callback=_engine_option,
-                 help="local (default: free, offline ML and rules) or llm (Claude API, paid). "
+                 help="hybrid (default: local ML clustering, the LLM writes the pulse; falls "
+                      "back to rules), local (ML clustering and rules only, no API), or llm "
+                      "(Claude clusters and writes; needs llm.provider: anthropic, paid). "
                       "Overrides analysis.engine."),
 ]
 
@@ -104,8 +106,8 @@ def _with_engine(cfg: PulseConfig, engine: str | None) -> PulseConfig:
     except ValueError as e:
         typer.secho(f"--engine {engine}: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(ExitCode.CONFIG_ERROR) from e
-    if engine == "local" and cfg.analysis.local is None:
-        typer.secho("--engine local needs an analysis.local section in pulse.yaml",
+    if engine in ("local", "hybrid") and cfg.analysis.local is None:
+        typer.secho(f"--engine {engine} needs an analysis.local section in pulse.yaml",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(ExitCode.CONFIG_ERROR)
     return cfg.model_copy(update={"analysis": cfg.analysis.model_copy(update={"engine": engine})})
@@ -367,12 +369,11 @@ def _analysis_stages(cfg: PulseConfig, week: str, summary: RunSummary) -> None:
                f"({hits})")
     typer.echo(f"  wrote {path}")
 
+    from pulse.analysis import llm as llm_mod
     from pulse.analysis.catalogue import CatalogueError, load_catalogue
 
-    llm = catalogue = None
+    llm = catalogue = llm_error = None
     if cfg.analysis.engine == "llm":
-        from pulse.analysis import llm as llm_mod
-
         llm = llm_mod.build_llm(cfg.llm, log_dir=cfg.paths.runs_path / week / "llm")
     else:
         try:
@@ -381,9 +382,17 @@ def _analysis_stages(cfg: PulseConfig, week: str, summary: RunSummary) -> None:
             summary.fail("analyze", str(e).splitlines()[0])
             typer.secho(str(e), fg=typer.colors.RED, err=True)
             raise typer.Exit(ExitCode.CONFIG_ERROR) from e
-    cluster = _cluster_stage(cfg, week, (start, end), result.reviews, llm, catalogue, summary)
+    if cfg.analysis.engine == "hybrid":
+        # The model is only used for writing; without it (no key) the rules write the pulse.
+        try:
+            llm = llm_mod.build_llm(cfg.llm, log_dir=cfg.paths.runs_path / week / "llm")
+        except llm_mod.LlmError as e:
+            llm_error = e
+    # Clustering is always the local ML for local and hybrid: the model never sees it.
+    cluster = _cluster_stage(cfg, week, (start, end), result.reviews,
+                             llm if cfg.analysis.engine == "llm" else None, catalogue, summary)
     _compose_stage(cfg, week, cluster, result.reviews, llm, catalogue, summary,
-                   unavailable=unavailable)
+                   unavailable=unavailable, llm_error=llm_error)
 
 
 def _cluster_stage(cfg: PulseConfig, week: str, window, reviews, llm, catalogue,
@@ -464,11 +473,17 @@ def _cluster_stage(cfg: PulseConfig, week: str, window, reviews, llm, catalogue,
 
 
 def _compose_stage(cfg: PulseConfig, week: str, cluster, reviews, llm, catalogue,
-                   summary: RunSummary, *, unavailable: list[str]) -> None:
-    """Stages 5–6: compose quotes, summaries and actions; validate; render (§4.5, §4.6, §7)."""
+                   summary: RunSummary, *, unavailable: list[str],
+                   llm_error: Exception | None = None) -> None:
+    """Stages 5–6: compose quotes, summaries and actions; validate; render (§4.5, §4.6, §7).
+
+    hybrid: the LLM writes on top of the ML results. If the model fails (no key, rate limit
+    after retries, bad output, or a pulse still failing validation after the rewrites), the
+    rules write the pulse instead and the manifest and run summary say why."""
     import time
 
     from pulse.analysis.compose import (
+        HYBRID_PROMPTS,
         LLM_PROMPTS,
         ComposeError,
         write_compose_artifacts,
@@ -483,14 +498,17 @@ def _compose_stage(cfg: PulseConfig, week: str, cluster, reviews, llm, catalogue
     before = Usage()
     if llm is not None:
         before.add(llm.usage)
-    typer.echo("  Composing the pulse (quotes, summaries, actions)"
-               + (" by rules and templates…" if engine == "local" else "…"))
+    how = {"local": " by rules and templates…",
+           "hybrid": f" with {cfg.llm.provider} {cfg.llm.model} on the ML results…"}
+    typer.echo("  Composing the pulse (quotes, summaries, actions)" + how.get(engine, "…"))
     started = time.monotonic()
     try:
         if engine == "llm":
             from pulse.analysis.engines.llm_compose import compose_pulse_llm
 
             result = compose_pulse_llm(llm, cluster, reviews, cfg)
+        elif engine == "hybrid":
+            result = _compose_hybrid(cfg, cluster, reviews, llm, llm_error, catalogue)
         else:
             from pulse.analysis.engines.rules_compose import compose_pulse_rules
 
@@ -514,16 +532,25 @@ def _compose_stage(cfg: PulseConfig, week: str, cluster, reviews, llm, catalogue
     paths = write_compose_artifacts(result, cfg, runs)
     summary.word_count, summary.max_words = result.report.word_count, cfg.analysis.max_words
     seconds = round(time.monotonic() - started, 1)
+    prompts = HYBRID_PROMPTS if engine == "hybrid" else LLM_PROMPTS
     update_manifest(runs, week, "compose", {
-        "status": "ok", "engine": engine, "attempts": len(result.attempts),
+        "status": "ok", "engine": engine, "composer": result.composer,
+        **({"fallback": result.fallback} if result.fallback else {}),
+        "attempts": len(result.attempts),
         "word_count": result.report.word_count, "max_words": cfg.analysis.max_words,
-        **({"prompt_versions": LLM_PROMPTS, "usage": _usage_since(llm.usage, before)}
+        **({"prompt_versions": prompts, "usage": _usage_since(llm.usage, before)}
            if llm is not None else {}),
         "seconds": seconds,
     })
+    summary.compose = _compose_label(cfg, result)
     (runs / week / "failure.json").unlink(missing_ok=True)  # a stale failure from earlier
     typer.echo(f"     passed every check on attempt {len(result.attempts)} · "
                f"{result.report.word_count}/{cfg.analysis.max_words} words · {seconds}s")
+    if llm is not None and engine == "hybrid":
+        u = _usage_since(llm.usage, before)
+        typer.echo(f"     {u['calls']} model calls · {u['input_tokens']:,} in / "
+                   f"{u['output_tokens']:,} out tokens · {u['rate_limit_waits']} rate-limit "
+                   f"waits · ≈${u['estimated_usd']:.2f} (per call: runs/{week}/llm/)")
     typer.echo(f"  wrote {paths['pulse_md']}, {paths['pulse_json'].name}, "
                f"{paths['validation'].name}")
     typer.echo("")
@@ -531,6 +558,53 @@ def _compose_stage(cfg: PulseConfig, week: str, cluster, reviews, llm, catalogue
         typer.echo("  (the pulse text is not printed on GitHub Actions; see the run summary)")
     else:
         typer.echo(paths["pulse_md"].read_text(encoding="utf-8"))
+
+
+FALLBACK_REASONS = {"rate_limit": "rate_limited", "auth": "no_key_or_bad_key",
+                    "schema": "bad_output", "max_tokens": "bad_output",
+                    "connection": "unreachable", "api_status": "api_error", "refusal": "refused",
+                    "missing_dependency": "missing_dependency"}
+
+
+def _fallback_reason(e: Exception) -> str:
+    from pulse.analysis.compose import ComposeError
+
+    if isinstance(e, ComposeError):
+        return "validation_failed"
+    return FALLBACK_REASONS.get(getattr(e, "kind", ""), "llm_error")
+
+
+def _compose_hybrid(cfg: PulseConfig, cluster, reviews, llm, llm_error, catalogue):
+    """The LLM writes on top of the ML results; on any model failure the rules write instead
+    (so the week still goes out). A rules failure is raised as usual."""
+    from pulse.analysis.compose import ComposeError
+    from pulse.analysis.engines.hybrid_compose import compose_pulse_hybrid
+    from pulse.analysis.engines.rules_compose import compose_pulse_rules
+    from pulse.analysis.llm import LlmError
+
+    error = llm_error
+    if llm is not None:
+        try:
+            return compose_pulse_hybrid(llm, cluster, reviews, cfg, catalogue)
+        except (LlmError, ComposeError) as e:
+            error = e
+    reason = _fallback_reason(error) if error else "no_model"
+    typer.secho(f"     ! the LLM could not write the pulse ({reason}: {str(error)[:200]}); "
+                "the rules write it instead", fg=typer.colors.YELLOW)
+    result = compose_pulse_rules(cluster, reviews, cfg, catalogue)
+    result.engine = "hybrid"
+    result.fallback = {"reason": reason, "error": str(error)[:300],
+                       "llm_attempts": getattr(error, "attempts", [])}
+    return result
+
+
+def _compose_label(cfg: PulseConfig, result) -> str:
+    """'llm (groq openai/gpt-oss-120b, attempt 1)' or 'rules (fallback: rate_limited)'."""
+    if result.fallback:
+        return f"rules (fallback: {result.fallback['reason']})"
+    if result.composer == "llm":
+        return f"llm ({cfg.llm.provider} {cfg.llm.model}, attempt {len(result.attempts)})"
+    return "rules"
 
 
 def _usage_since(now, before) -> dict:

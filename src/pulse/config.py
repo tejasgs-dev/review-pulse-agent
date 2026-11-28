@@ -122,13 +122,22 @@ class LocalEngineConfig(_Strict):
     quote_off_topic_words: list[str] = Field(default_factory=list)
 
 
-Engine = Literal["local", "llm"]
+Engine = Literal["local", "hybrid", "llm"]
+
+
+class HybridConfig(_Strict):
+    """`hybrid` engine: the local ML clustering decides themes and numbers; the LLM only reads
+    a small sample of scrubbed quotes per top theme and writes the pulse."""
+
+    sample_per_theme: int = Field(default=10, ge=3, le=12)   # quotable reviews sent per theme
+    keywords_per_theme: int = Field(default=8, ge=3, le=15)  # ML top keywords sent per theme
 
 
 class AnalysisConfig(_Strict):
     engine: Engine = "local"
     theme_catalogue: str = "config/themes.yaml"
     local: LocalEngineConfig | None = None
+    hybrid: HybridConfig = HybridConfig()
     max_themes: int = Field(default=5, ge=3, le=5)
     top_themes: int = 3
     quotes: int = 3
@@ -154,8 +163,9 @@ class AnalysisConfig(_Strict):
             raise ValueError("top_themes cannot exceed max_themes")
         if self.quote_min_words > self.quote_max_words:
             raise ValueError("quote_min_words cannot exceed quote_max_words")
-        if self.engine == "local" and self.local is None:
-            raise ValueError("analysis.local is required when analysis.engine is local")
+        if self.engine in ("local", "hybrid") and self.local is None:
+            raise ValueError(f"analysis.local is required when analysis.engine is {self.engine} "
+                             "(both cluster with the local ML engine)")
         return self
 
     @property

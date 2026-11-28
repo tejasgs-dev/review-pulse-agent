@@ -155,7 +155,8 @@ def compose_pulse_llm(llm: StructuredLlm, cluster: ClusterResult, reviews: Seque
                                                    ("writing", retry_writing)) if on],
                          **report.to_dict()})
         if report.ok:
-            return ComposeResult(pulse=pulse, report=report, attempts=attempts, engine="llm")
+            return ComposeResult(pulse=pulse, report=report, attempts=attempts, engine="llm",
+                                 composer="llm")
         quote_errors = report.for_area("quotes")
         writing_errors = report.for_area("writing")
         retry_quotes, retry_writing = bool(quote_errors), bool(writing_errors)

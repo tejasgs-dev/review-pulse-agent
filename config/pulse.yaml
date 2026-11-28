@@ -52,10 +52,17 @@ privacy:
                                     # amounts after ₹ / Rs / INR are never redacted
 
 analysis:
-  # local (default): sentence embeddings + k-means, rules and templates; free, offline after
-  # the first model download, deterministic. llm: the Claude API (optional `[llm]` extra,
-  # needs ANTHROPIC_API_KEY, costs money). `--engine` on the CLI overrides this.
-  engine: local
+  # hybrid (default): the local ML clustering below sorts and counts the reviews (unchanged);
+  #   the LLM (llm.provider, free Groq) reads a small sample of scrubbed quotes per top theme
+  #   and writes the summaries, quote picks and action ideas. Every number comes from the ML.
+  #   If the model fails, the rules and templates write the pulse instead.
+  # local: the same ML clustering, with rules and templates only; no API at all.
+  # llm: Claude clusters and writes (needs llm.provider: anthropic; paid).
+  # `--engine` on the CLI overrides this.
+  engine: hybrid
+  hybrid:
+    sample_per_theme: 10            # scrubbed, quotable reviews sent per top theme (never all)
+    keywords_per_theme: 8           # ML top keywords sent per theme
   theme_catalogue: config/themes.yaml   # labels, keywords and templates (§4.4, §4.5)
   local:
     model: minishlab/potion-base-8M     # model2vec static embeddings, about 30 MB

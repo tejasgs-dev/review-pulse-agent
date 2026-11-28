@@ -28,7 +28,7 @@ Area = Literal["quotes", "writing", "both", "structure"]
 CHECKS = (
     "theme_count", "quote_count", "quote_fidelity", "quote_theme_link", "quote_length",
     "action_count", "action_theme_link", "summaries", "no_stats_in_text", "word_count",
-    "pii_scan", "placeholders",
+    "pii_scan", "placeholders", "numbers_match_ml",
 )
 
 # Only the real template tokens, never any angle bracket: a quote may say "<3" (VAL-05).
@@ -36,6 +36,8 @@ _PLACEHOLDER = re.compile(r"<verbatim quote \d+>|\{(?:doc_url|date|iso_week|week
                           r"action|signal|label)\}|\bTODO\b")
 # A statistic written by the model; numbers are inserted by the renderer (CMP-22).
 _STAT = re.compile(r"\d+(?:\.\d+)?\s*%|\b\d+\s*(?:out of|in)\s*\d+\b")
+# Any number in text, e.g. "41", "1,204", "3.5".
+_NUMBER = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?")
 
 
 @dataclass(frozen=True)
@@ -78,8 +80,13 @@ def validate_pulse(
     assignments: Mapping[str, str],
     cfg: PulseConfig,
     doc_url: str | None = None,
+    ml_numbers: Mapping[str, set[str]] | None = None,
 ) -> ValidationReport:
-    """Run every check. `assignments` maps review ID -> primary theme ID."""
+    """Run every check. `assignments` maps review ID -> primary theme ID.
+
+    `ml_numbers` (hybrid engine) maps each top theme to the only numbers its action and
+    signal may contain, formatted from the ML stats. Summaries may then hold no digit at all,
+    and every signal must state the theme's 14-day figure."""
     a = cfg.analysis
     r = ValidationReport()
     top_ids = [t.id for t in pulse.top_themes]
@@ -147,6 +154,23 @@ def validate_pulse(
         elif _STAT.search(t.summary):
             r.add("no_stats_in_text", f"summary of {t.id} states a statistic; write words "
                   "only, the numbers are added automatically", "writing")
+
+    # Numbers come from the ML only (hybrid engine): the model never states its own figures.
+    if ml_numbers is not None:
+        for t in pulse.top_themes:
+            if re.search(r"\d", t.summary):
+                r.add("numbers_match_ml", f"the summary of {t.id} contains a number; "
+                      "summaries carry no numbers", "writing")
+        for x in pulse.actions:
+            allowed = ml_numbers.get(x.theme_id, set())
+            for text in (x.action, x.signal):
+                for n in _NUMBER.findall(text):
+                    if n not in allowed:
+                        r.add("numbers_match_ml", f"the action or signal of {x.theme_id} "
+                              f"states {n}, which is not an ML figure for that theme", "writing")
+            if not any(n in allowed for n in _NUMBER.findall(x.signal)):
+                r.add("numbers_match_ml", f"the signal of {x.theme_id} must state the theme's "
+                      "last-two-weeks figure ({recent_count})", "writing")
 
     # Word count on the rendered body.
     body = render_body(pulse)

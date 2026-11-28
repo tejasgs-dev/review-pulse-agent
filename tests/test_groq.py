@@ -55,9 +55,11 @@ class FakeGroqSdk:
 
     def _create(self, **kwargs):
         self.requests.append(kwargs)
-        item = self.script.pop(0)
+        item = self.script.pop(0) if len(self.script) > 1 else self.script[0]  # last repeats
         if isinstance(item, Exception):
             raise item
+        if callable(item):            # computes the answer from the request
+            item = item(kwargs)
         return SimpleNamespace(parse=lambda: item, headers=httpx.Headers(HEADERS))
 
 

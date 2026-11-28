@@ -10,7 +10,8 @@
   computed stats (CMP-22); `validate.py` checks the result.
 
 The engines are `engines/rules_compose.py` (default: rules and templates) and
-`engines/llm_compose.py` (optional: Claude).
+`engines/llm_compose.py` (optional: Claude), and `engines/hybrid_compose.py` (the default:
+the LLM writes on top of the local ML results).
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from pulse.render.markdown import email_subject, render_body, render_doc, render
 from pulse.textutil import word_count
 
 LLM_PROMPTS = {"quote_pick": "quote_pick_v1", "write": "write_v1"}
+HYBRID_PROMPTS = {"write": "write_v2"}
 MAX_RETRIES = 2
 MAX_CANDIDATES = 8
 
@@ -171,6 +173,10 @@ class ComposeResult:
     attempts: list[dict[str, Any]]
     usage: dict[str, Any] = field(default_factory=dict)
     engine: str = "local"
+    # Who wrote the text: "llm" or "rules". With the hybrid engine, `fallback` says why the
+    # rules wrote it instead, e.g. {"reason": "rate_limited", "error": "..."}.
+    composer: str = "rules"
+    fallback: dict[str, Any] | None = None
 
 
 def build_contexts(cluster: ClusterResult, reviews: Sequence[CleanReview],
@@ -294,7 +300,11 @@ def write_compose_artifacts(result: ComposeResult, cfg: PulseConfig, runs_dir: P
     write_json(paths["pulse_json"], {
         **_jsonable(pulse),
         "engine": result.engine,
+        "composer": result.composer,
+        **({"fallback": result.fallback["reason"]} if result.fallback else {}),
         **({"prompt_versions": LLM_PROMPTS} if result.engine == "llm" else {}),
+        **({"prompt_versions": HYBRID_PROMPTS}
+           if result.engine == "hybrid" and result.composer == "llm" else {}),
         "email": {"subject": email_subject(cfg.product.name, pulse.week),
                   "body": render_email(pulse, product=cfg.product.name,
                                        min_words=cfg.ingest.min_words)},

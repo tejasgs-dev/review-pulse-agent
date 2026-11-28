@@ -104,13 +104,18 @@ def _not_on_github_actions(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_real_llm(request, monkeypatch):
-    """Offline tests must never reach the real Claude API (it costs money). Tests that need a
-    model patch `build_llm` with a fake; `@pytest.mark.slow` tests are exempt."""
+    """Offline tests must never reach a real model API (Claude costs money; Groq has limits).
+    Tests that need a model patch `build_llm` with a fake; `@pytest.mark.slow` tests are
+    exempt."""
     if request.node.get_closest_marker("slow"):
         return
 
     def refuse(*args, **kwargs):
-        raise RuntimeError("tests must not call a real model API; patch build_llm")
+        # Like a run without a key: the hybrid engine falls back to rules, and the publishing
+        # agent to the scripted publisher. Tests that need a model patch build_llm.
+        from pulse.analysis.llm import LlmError
+
+        raise LlmError("tests must not call a real model API; patch build_llm", kind="auth")
 
     monkeypatch.setattr("pulse.analysis.llm.build_llm", refuse)
     # The developer's real key must never reach a test. Empty, not deleted: load_config()

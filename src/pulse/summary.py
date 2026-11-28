@@ -64,6 +64,8 @@ class RunSummary:
     reviews: int | None = None           # reviews in the window that went into analysis
     min_reviews: int | None = None
     themes: list[str] = field(default_factory=list)   # top theme labels, in rank order
+    # Who wrote the pulse: "llm (groq …, attempt 1)" or "rules (fallback: rate_limited)".
+    compose: str | None = None
     word_count: int | None = None
     max_words: int | None = None
     publish: str | None = None           # sent | skipped | dry run | failed | partial
@@ -119,6 +121,8 @@ class RunSummary:
             rows.append(("Reviews analysed", text))
         if self.themes:
             rows.append(("Top themes", " · ".join(self.themes)))
+        if self.compose:
+            rows.append(("Compose", self.compose))
         if self.word_count is not None:
             rows.append(("Words", f"{self.word_count}/{self.max_words}"))
         if self.publish:

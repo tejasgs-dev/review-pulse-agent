@@ -28,7 +28,7 @@ def test_dry_run_with_local_engine(tmp_config, tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     store_corpus(tmp_path)
     result = runner.invoke(app, ["run", "--week", "2026-W46", "--dry-run", "--skip-ingest",
-                                 "--config", str(tmp_config())])
+                                 "--engine", "local", "--config", str(tmp_config())])
     assert result.exit_code == ExitCode.OK, result.output
     assert "local engine" in result.output and "no API calls" in result.output
     week = tmp_path / "runs" / "2026-W46"
@@ -49,12 +49,13 @@ def test_dry_run_with_local_engine(tmp_config, tmp_path, monkeypatch):
 
 def test_engine_option_is_validated(tmp_config):
     result = runner.invoke(app, ["analyze", "--engine", "gpt", "--config", str(tmp_config())])
-    assert result.exit_code != 0 and "must be local or llm" in result.output
+    assert result.exit_code != 0 and "must be local, hybrid or llm" in result.output
 
 
 def test_doctor_checks_the_local_engine(tmp_config, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-    result = runner.invoke(app, ["doctor", "--offline", "--config", str(tmp_config())])
+    path = tmp_config(lambda d: d["analysis"].__setitem__("engine", "local"))
+    result = runner.invoke(app, ["doctor", "--offline", "--config", str(path)])
     assert "analysis engine: local" in result.output
     assert "theme catalogue is valid" in result.output
     assert "ANTHROPIC_API_KEY" not in result.output      # not needed by the local engine
