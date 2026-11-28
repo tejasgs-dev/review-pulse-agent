@@ -49,8 +49,11 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      # Editable (-e), like the README setup and CI: the app finds config/, runs/ and site/
+      # from the source checkout. A plain `pip install .` copies it into site-packages, where
+      # config/pulse.yaml is not found.
       - name: Install ReviewPulse
-        run: pip install .
+        run: pip install -e .
 
       - name: Pick the week
         id: week
