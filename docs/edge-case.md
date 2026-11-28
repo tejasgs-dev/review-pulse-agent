@@ -311,6 +311,31 @@ This document lists the inputs, states, and failures the system must handle on p
 | GML-05 | Docs succeeded and Gmail failed | Resume from the Gmail step on the next `pulse publish`. | §10 |
 | GML-06 | Gmail succeeds but Docs had failed (the order should prevent this) | The draft needs the Doc URL, so Gmail must never run without a `doc_url`. | §4.7 (implied) |
 
+### 8.4 The publishing agent (`publish.mode: agent`)
+
+| ID | Scenario | Expected behavior | Covered by |
+|---|---|---|---|
+| AGT-01 | The agent says it is done after the Doc entry is **confirmed**, but never tries the email (or it runs out of steps there) | The code sends the email itself, through the same guarded step, with no intro. The outcome says the code sent it; `agent_log.json` has `"finished_by_code": true`, and the step is marked `"by": "code"`. Nothing is sent if the email was already tried, if the entry is not confirmed in the Doc, or if the week was already published. | `publish/agent.py` (`_send_if_the_agent_stopped_early`); `tests/test_agent.py`; seen live in 2026-W47, see below |
+| AGT-02 | The agent stops after appending but **before** confirming the entry | No email (the entry is not confirmed). The run fails as `partial` at the `send` step. | `tests/test_agent.py::test_stopping_before_publishing_is_a_failure` |
+| AGT-03 | The model errors (no key, rate limit, unreachable) before the email was tried | The scripted publisher takes over; it re-checks the Doc, so it never appends twice. | `tests/test_agent.py` (fallback tests) |
+
+#### Incident: 2026-W47, the agent stopped before sending the email (2026-11-28)
+
+**What happened.** The first real `pulse-check.yml` run on GitHub Actions built the W47 pulse (hybrid engine, 1,286 reviews, 248/250 words). Then it handed publishing to the Groq agent (`openai/gpt-oss-120b`). The agent made three correct calls: `check_already_published` (not in the Doc), `append_week_entry`, and `verify_entry_in_doc` (confirmed). Then it replied "Pulse published successfully." and stopped, without calling `send_pulse_email`.
+
+**How it was caught.** By code, not by the model. After the agent stops, `_finish` checks in code whether the email was sent. It wasn't, so the run was marked failed ("the agent stopped before the week was published", exit 11). `publish.json` was saved as `partial`, and the job turned red. The guardrails held: nothing was sent that shouldn't have been, and nothing was published twice. The workflow still exported and committed `site/pulses/2026-W47.json`, because the entry *was* in the Doc, so the Doc and the site match.
+
+**Why it slipped through before.** The scripted fallback only took over when the model **raised an error**. A model that *thinks it is done too early* is a different failure, and no test covered it. The prompt also never said clearly that the email is part of the work.
+
+**Fix.**
+1. **Code:** when the agent stops with the entry confirmed in the Doc and the email never tried, the code sends it through the same guarded send step (AGT-01). It still sends at most once and never retries, and it never sends for a week that was already published.
+2. **Prompt** `publish_agent_v2`: publishing has two parts, the Doc entry *and* the email. The work is done only once `send_pulse_email` answers "sent"; never say the pulse is published before that.
+3. **Tests:** stops after verify; runs out of steps after verify; an `--email-only` run that stops after the check; no send for a week already published; no second send after the agent's own send failed; a failed code send ends as `partial` and is not retried.
+
+**W47 itself.** The W47 email was skipped on purpose; the Doc entry and the site have the week. Re-sending it from a new runner would need the pulse rebuilt, and the LLM would write different wording from the Doc (see README, `--email-only`). The next scheduled run (W48) is the first live test of the fix.
+
+**Lesson.** An LLM can say "done" when it isn't. The program, not the model, must decide whether the work is complete, and must have a safe way to finish it.
+
 ---
 
 ## 9. Orchestration, CLI, and Scheduling (§4.8, §4.9, P6, P7)

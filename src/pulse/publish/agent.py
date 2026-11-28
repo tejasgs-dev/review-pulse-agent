@@ -58,7 +58,8 @@ from pulse.publish.mcp_client import (
 )
 from pulse.render.markdown import week_of
 
-PROMPT = "publish_agent_v1"
+PROMPT = "publish_agent_v2"   # v2: the work is done only once the email is sent
+CODE_SEND_REASON = "sent by the code: the agent stopped after the Doc entry was confirmed"
 Echo = Callable[[str], None]
 
 _REASON = {"type": "string", "description": "One short sentence: why this step now."}
@@ -182,6 +183,7 @@ class AgentLog:
     final_message: str | None = None
     fallback: dict[str, Any] | None = None
     tokens: int = 0
+    finished_by_code: bool = False   # the agent stopped early; the code sent the email
 
     def add(self, **step: Any) -> None:
         self.steps.append({"n": len(self.steps) + 1, **step, "at": _now()})
@@ -192,7 +194,8 @@ class AgentLog:
             "week": self.week, "mode": "agent", "model": self.model,
             "max_steps": self.max_steps, "started_at": self.started_at,
             "outcome": self.outcome, "final_message": self.final_message,
-            "fallback": self.fallback, "tokens": self.tokens, "steps": self.steps})
+            "fallback": self.fallback, "finished_by_code": self.finished_by_code,
+            "tokens": self.tokens, "steps": self.steps})
 
     def lines(self) -> list[str]:
         """A readable version for the run summary."""
@@ -284,7 +287,8 @@ def _finish(cfg, week, p, guard: Guard, log: AgentLog, echo: Echo) -> dict[str, 
                  "and send the email")
     if guard.sent:
         save("sent")
-        log.outcome = "published"
+        log.outcome = ("published (the agent stopped before the email; the code sent it)"
+                       if log.finished_by_code else "published")
         log.write()
         return record
     if guard.nothing_to_do and not guard.appended and not guard.send_attempted:
@@ -329,8 +333,32 @@ async def _run(cfg: PulseConfig, week: str, llm, p, guard: Guard, log: AgentLog,
         tools = _Tools(cfg, p, guard, docs, gmail, echo)
         try:
             await _loop(cfg, week, llm, tools, guard, log, echo)
+            await _send_if_the_agent_stopped_early(tools, guard, log, echo)
         finally:
             record["calls"] += docs.calls
+
+
+async def _send_if_the_agent_stopped_early(tools: _Tools, guard: Guard, log: AgentLog,
+                                           echo: Echo) -> None:
+    """The agent stopped (it said it was done, or ran out of steps) after the entry was
+    confirmed in the Doc but without trying the email: the code sends it itself, through the
+    same guarded tool, with no intro (2026-W47 on GitHub Actions: check -> append -> verify,
+    then "Pulse published successfully" and no send). Nothing happens if the email was
+    already tried, if the entry is not confirmed in the Doc, or if the guard would refuse the
+    send (e.g. the week was already published)."""
+    if guard.send_attempted or not guard.in_doc or guard.refuse("send_pulse_email"):
+        return
+    echo("  The agent stopped before sending the email; the code sends it now (no intro).")
+    log.finished_by_code = True
+    try:
+        status, result = await tools.send()
+    except (McpSetupError, McpCallError) as e:
+        log.add(turn=None, tool="send_pulse_email", arguments={}, by="code",
+                reason=CODE_SEND_REASON, status="error", result=str(e)[:300])
+        raise
+    log.add(turn=None, tool="send_pulse_email", arguments={}, by="code",
+            reason=CODE_SEND_REASON, status=status, result=result)
+    echo(f"  Code step {len(log.steps)}: send_pulse_email → {status}: {result}")
 
 
 async def _loop(cfg, week, llm, tools: _Tools, guard: Guard, log: AgentLog, echo: Echo):
@@ -469,6 +497,11 @@ class _Tools:
         problem = check_intro(intro, self.cfg)
         if problem:              # refused before anything is sent; the send is not used up
             return "refused", problem
+        return await self.send(intro)
+
+    async def send(self, intro: str = "") -> tuple[str, str]:
+        """The one send, after the guard allowed it. Also used by the code (no intro) when
+        the agent stopped before sending."""
         self.guard.send_attempted = True    # from here on, never again in this run
         gmail = await self.gmail()
         r = await rn.send_step(gmail, self.cfg, self.p.art, self.p.record, self.p.save,

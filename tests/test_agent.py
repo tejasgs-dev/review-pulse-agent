@@ -177,11 +177,95 @@ def test_reaching_max_steps_stops_with_a_failure(pcfg, fake_mcp):
 
 def test_stopping_before_publishing_is_a_failure(pcfg, fake_mcp):
     write_week(pcfg)
-    llm = FakeAgentLlm(CHECK, APPEND, DONE)          # appended, then gave up
+    llm = FakeAgentLlm(CHECK, APPEND, DONE)          # appended, then gave up, not verified
     with pytest.raises(PublishError) as e:
         publish_week_agent(pcfg, WEEK, llm)
     assert e.value.step == "send"                    # the CLI then suggests --email-only
+    assert fake_mcp.sent == []                       # not confirmed in the Doc: no email
     assert read_record(pcfg.paths.runs_path, WEEK)["status"] == "partial"
+
+
+# ------------------------------------------- the agent stops early: the code sends (W47)
+
+
+def test_agent_stopping_after_verify_the_code_sends_the_email(pcfg, fake_mcp):
+    """2026-W47 on GitHub Actions: check -> append -> verify, then "published" and no send."""
+    write_week(pcfg)
+    llm = FakeAgentLlm(CHECK, APPEND, VERIFY, DONE)
+    result = publish_week_agent(pcfg, WEEK, llm)
+
+    assert result.mode == "agent" and result.record["status"] == "sent"
+    assert fake_mcp.tool_names() == ["doc_contains_text", "append_to_doc",
+                                     "doc_contains_text", "send_email"]
+    (mail,) = fake_mcp.sent
+    assert mail["to"] == "me@example.com"
+    assert not mail["body"].startswith(INTRO)                   # the code writes no intro
+    assert doc_text(fake_mcp).count(MARKER) == 1                # appended once
+    log = agent_log(pcfg)
+    assert log["finished_by_code"] is True
+    assert log["outcome"] == ("published (the agent stopped before the email; the code "
+                              "sent it)")
+    last = log["steps"][-1]
+    assert (last["tool"], last["status"], last["by"]) == ("send_pulse_email", "ok", "code")
+    assert "intro" not in read_record(pcfg.paths.runs_path, WEEK)["email"]
+
+
+def test_agent_out_of_steps_after_verify_the_code_sends_the_email(pcfg, fake_mcp):
+    write_week(pcfg)
+    llm = FakeAgentLlm(CHECK, APPEND, VERIFY, *[VERIFY] * 20)    # loops until max_steps
+    result = publish_week_agent(pcfg, WEEK, llm)
+    assert result.record["status"] == "sent" and len(fake_mcp.sent) == 1
+    assert len(llm.requests) == pcfg.publish.agent.max_steps
+    assert agent_log(pcfg)["finished_by_code"] is True
+
+
+def test_email_only_run_where_the_agent_stops_after_the_check(pcfg, fake_mcp):
+    write_week(pcfg)
+    publish_already_in_doc(fake_mcp)
+    result = publish_week_agent(pcfg, WEEK, FakeAgentLlm(CHECK, DONE), email_only=True)
+    assert result.record["status"] == "sent" and len(fake_mcp.sent) == 1
+    assert "append_to_doc" not in fake_mcp.tool_names()
+
+
+def test_the_code_never_sends_for_a_week_that_was_already_published(pcfg, fake_mcp):
+    write_week(pcfg)
+    publish_already_in_doc(fake_mcp)
+    result = publish_week_agent(pcfg, WEEK, FakeAgentLlm(CHECK, DONE))
+    assert result.record["status"] == "skipped"
+    assert fake_mcp.sent == [] and fake_mcp.tool_names() == ["doc_contains_text"]
+    assert agent_log(pcfg)["finished_by_code"] is False
+
+
+def test_the_code_does_not_send_again_after_the_agent_tried(pcfg, fake_mcp):
+    write_week(pcfg)
+    fake_mcp.fail["send_email"] = "Gmail API error: backend error"
+    llm = FakeAgentLlm(CHECK, APPEND, VERIFY, SEND, DONE)
+    with pytest.raises(PublishError) as e:
+        publish_week_agent(pcfg, WEEK, llm)
+    assert e.value.step == "send"
+    assert fake_mcp.tool_names().count("send_email") == 1       # never a second try
+    assert agent_log(pcfg)["finished_by_code"] is False
+
+
+def test_a_failed_code_send_is_partial_and_not_retried(pcfg, fake_mcp):
+    write_week(pcfg)
+    fake_mcp.fail["send_email"] = "Gmail API error: backend error"
+    with pytest.raises(PublishError) as e:
+        publish_week_agent(pcfg, WEEK, FakeAgentLlm(CHECK, APPEND, VERIFY, DONE))
+    assert e.value.step == "send"
+    assert fake_mcp.tool_names().count("send_email") == 1
+    assert read_record(pcfg.paths.runs_path, WEEK)["status"] == "partial"
+    last = agent_log(pcfg)["steps"][-1]
+    assert (last["by"], last["status"]) == ("code", "error")
+
+
+def test_the_prompt_says_the_email_is_part_of_the_work(pcfg, fake_mcp):
+    write_week(pcfg)
+    llm = FakeAgentLlm(CHECK, APPEND, VERIFY, SEND, DONE)
+    publish_week_agent(pcfg, WEEK, llm)
+    system = llm.requests[0]["messages"][0]["content"]
+    assert "only half of the work" in system
+    assert "Never say the pulse is published before the email is sent" in system
 
 
 # ---------------------------------------------------------------------------- fixed by code

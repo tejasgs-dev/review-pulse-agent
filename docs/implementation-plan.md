@@ -471,7 +471,7 @@ A later upgrade, built on top of Phases 0–6, adds a free LLM (Groq) to the wri
 | 1 | Groq as the default LLM provider (`llm.provider: groq`, `GROQ_API_KEY`); `pulse doctor --live` tests the key | Done (`d7e33aa`, `aa3f722`) |
 | 2 | `hybrid` engine, now the default: local ML clusters and counts, Groq writes the summaries, quote picks and actions; falls back to rules | Done (`18cd7e5`, `06f33eb`; see [before-after-W46.md](before-after-W46.md)) |
 | 3 | Agentic publishing, now the default (`publish.mode: agent`): the LLM chooses the next tool call among four guarded tools; every step is logged to `runs/{week}/agent_log.json`; falls back to the scripted order | Done (`f8a61f9`) |
-| 4 | `.github/workflows/pulse-check.yml`: the weekly run on GitHub Actions with the hybrid engine and agent publishing, the four secrets, `pulse export-site` and the `site/pulses/` commit | Built 2026-11-28; waiting for the first green manual run |
+| 4 | `.github/workflows/pulse-check.yml`: the weekly run on GitHub Actions with the hybrid engine and agent publishing, the four secrets, `pulse export-site` and the `site/pulses/` commit | Built 2026-11-28. First real run (W47): Doc entry and site commit OK, but the agent stopped before the email ([edge-case.md AGT-01](edge-case.md#84-the-publishing-agent-publishmode-agent)); fixed: the code now sends it, prompt `publish_agent_v2`. W47's email skipped on purpose; the scheduled W48 run is the next live test |
 
 Deployment (website on Vercel, a small read-only API on Render) comes after this: [deployment-plan.md](deployment-plan.md). It reuses `pulse-check.yml` and never runs the pulse.
 
