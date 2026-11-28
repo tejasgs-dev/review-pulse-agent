@@ -261,12 +261,24 @@ _DOC_URL = re.compile(r"/document/(?:u/\d+/)?d/([A-Za-z0-9_-]+)")
 _DOC_ID = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 
 
+class AgentConfig(_Strict):
+    """The publishing agent (publish.mode: agent)."""
+
+    max_steps: int = Field(default=8, ge=3, le=20)        # model turns before the run stops
+    intro_max_chars: int = Field(default=200, ge=40, le=500)   # the agent's email intro line
+
+
 class PublishConfig(_Strict):
     """Where the weekly pulse goes (architecture §4.7): one Google Doc, made by hand once and
     appended to every week, and one email recipient. The app never creates a doc."""
 
     doc_id: str | None = None
     recipient: str | None = None
+    # agent (default): the LLM chooses the order of the publishing tool calls; the guardrails
+    # stay in code. scripted: the fixed order check -> append -> send, no model involved.
+    # Without a working model the agent mode falls back to scripted. `--mode` overrides.
+    mode: Literal["agent", "scripted"] = "agent"
+    agent: AgentConfig = Field(default_factory=lambda: AgentConfig())
 
     @field_validator("doc_id", "recipient", mode="before")
     @classmethod

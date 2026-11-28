@@ -86,6 +86,20 @@ def _engine_option(value: str | None) -> str | None:
     return value
 
 
+def _mode_option(value: str | None) -> str | None:
+    if value is not None and value not in ("agent", "scripted"):
+        raise typer.BadParameter("must be agent or scripted")
+    return value
+
+
+ModeOpt = Annotated[
+    str | None,
+    typer.Option("--mode", callback=_mode_option,
+                 help="How to publish: agent (default: the LLM chooses the tool calls; the "
+                      "guardrails stay in code; falls back to scripted) or scripted (the fixed "
+                      "order, no model). Overrides publish.mode."),
+]
+
 EngineOpt = Annotated[
     str | None,
     typer.Option("--engine", callback=_engine_option,
@@ -176,6 +190,7 @@ def run(
     ] = False,
     skip_ingest: Annotated[bool, typer.Option("--skip-ingest")] = False,
     engine: EngineOpt = None,
+    mode: ModeOpt = None,
     config: ConfigOpt = None,
 ) -> None:
     """Run the whole pipeline for one week: ingest, then stages 3–6, then publish.
@@ -209,7 +224,7 @@ def run(
             summary.publish_detail = "nothing was published"
             typer.secho("Dry run: nothing was published.", fg=typer.colors.GREEN)
             return
-        _publish_stage(cfg, week, summary=summary)
+        _publish_stage(cfg, week, summary=summary, mode=mode)
 
 
 @app.command()
@@ -635,7 +650,7 @@ EmailOnlyOpt = Annotated[bool, typer.Option(
 
 @app.command()
 def publish(week: WeekOpt = None, force: ForceOpt = False, email_only: EmailOnlyOpt = False,
-            config: ConfigOpt = None) -> None:
+            mode: ModeOpt = None, config: ConfigOpt = None) -> None:
     """Stage 7 from saved run artifacts: append the week to the Google Doc (PULSE_DOC_ID), then
     email it to PULSE_RECIPIENT. A week already published is skipped unless --force."""
     if force and email_only:
@@ -645,12 +660,27 @@ def publish(week: WeekOpt = None, force: ForceOpt = False, email_only: EmailOnly
     with _guarded(summary, show=True):
         cfg = _load(config)
         summary.recipient = cfg.publish.recipient
-        _publish_stage(cfg, week, force=force, email_only=email_only, summary=summary)
+        _publish_stage(cfg, week, force=force, email_only=email_only, summary=summary,
+                       mode=mode)
+
+
+def _publish_agent_llm(cfg: PulseConfig, week: str):
+    """The model for the publishing agent, or (None, why) when there is none to use."""
+    from pulse.analysis import llm as llm_mod
+
+    if cfg.llm.provider != "groq":
+        return None, "agent_needs_groq"     # the agent uses Groq's tool calling
+    try:
+        llm = llm_mod.build_llm(cfg.llm, log_dir=cfg.paths.runs_path / week / "llm")
+    except llm_mod.LlmError as e:
+        return None, _fallback_reason(e)
+    return llm, None
 
 
 def _publish_stage(cfg: PulseConfig, week: str, *, summary: RunSummary, force: bool = False,
-                   email_only: bool = False) -> None:
+                   email_only: bool = False, mode: str | None = None) -> None:
     from pulse.manifest import update_manifest
+    from pulse.publish.agent import publish_week_agent
     from pulse.publish.runner import PublishError, publish_path, publish_week
 
     summary.current_stage = "publish"
@@ -664,12 +694,31 @@ def _publish_stage(cfg: PulseConfig, week: str, *, summary: RunSummary, force: b
     what = "send only the email to" if email_only else "append to the Google Doc, then email"
     typer.echo(shown(f"Publishing {week} through MCP ({what} "
                      f"{recipient or 'PULSE_RECIPIENT'})…"))
+    mode = mode or cfg.publish.mode
+
+    def echo(line: str) -> None:
+        typer.echo(shown(line))
+
+    llm, fallback = _publish_agent_llm(cfg, week) if mode == "agent" else (None, None)
+    if mode == "agent" and llm is None:
+        typer.secho(f"  ! the publishing agent is not available ({fallback}); the scripted "
+                    "publisher takes over", fg=typer.colors.YELLOW)
+    used = "agent" if llm is not None else "scripted"
     try:
-        record = publish_week(cfg, week, force=force, email_only=email_only,
-                              echo=lambda line: typer.echo(shown(line)))
+        if llm is not None:
+            typer.echo(f"  The publishing agent ({cfg.llm.provider} {cfg.llm.model}) chooses "
+                       f"the tool calls; at most {cfg.publish.agent.max_steps} steps.")
+            result = publish_week_agent(cfg, week, llm, force=force, email_only=email_only,
+                                        echo=echo)
+            record, used, fallback = result.record, result.mode, result.fallback
+        else:
+            record = publish_week(cfg, week, force=force, email_only=email_only, echo=echo)
     except PublishError as e:
+        _note_publish_mode(cfg, week, summary, used, fallback)
         if e.record:
-            update_manifest(cfg.paths.runs_path, week, "publish", _publish_summary(e.record))
+            update_manifest(cfg.paths.runs_path, week, "publish",
+                            {**_publish_summary(e.record), "mode": used,
+                             **({"fallback": fallback} if fallback else {})})
         hint = _publish_hint(e, week)
         summary.fail("publish", str(e))     # redacted there: the summary never has it
         summary.publish = e.record.get("status") or "failed"
@@ -680,7 +729,10 @@ def _publish_stage(cfg: PulseConfig, week: str, *, summary: RunSummary, force: b
                         fg=typer.colors.RED, err=True)
         raise typer.Exit(ExitCode.CONFIG_ERROR if e.setup and not e.record
                          else ExitCode.PUBLISH_FAILED) from e
-    update_manifest(cfg.paths.runs_path, week, "publish", _publish_summary(record))
+    _note_publish_mode(cfg, week, summary, used, fallback)
+    update_manifest(cfg.paths.runs_path, week, "publish",
+                    {**_publish_summary(record), "mode": used,
+                     **({"fallback": fallback} if fallback else {})})
     retries = len(record.get("retries", []))
     retried = f", after {retries} {'retry' if retries == 1 else 'retries'}" if retries else ""
     summary.publish = record["status"]
@@ -692,6 +744,27 @@ def _publish_stage(cfg: PulseConfig, week: str, *, summary: RunSummary, force: b
     summary.publish_detail = ("email only" if email_only
                               else "Doc entry appended, email sent") + retried
     typer.secho(f"Published {week}: {record['doc_url']}", fg=typer.colors.GREEN)
+
+
+def _note_publish_mode(cfg: PulseConfig, week: str, summary: RunSummary, used: str,
+                       fallback: str | None) -> None:
+    """The run summary's publish mode and, for the agent, its steps from agent_log.json."""
+    import json
+
+    if used != "agent":
+        summary.publish_mode = f"scripted (fallback: {fallback})" if fallback else "scripted"
+        return
+    try:
+        log = json.loads((cfg.paths.runs_path / week / "agent_log.json")
+                         .read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        log = {}
+    steps = [s for s in log.get("steps", []) if s.get("tool")]
+    summary.publish_mode = (f"agent ({cfg.llm.provider} {cfg.llm.model}, {len(steps)} tool "
+                            f"calls, {log.get('tokens', 0):,} tokens)")
+    summary.agent_steps = [
+        f"{s['tool']} → {s['status']}: {s['result']}"
+        + (f" · “{s['reason']}”" if s.get("reason") else "") for s in steps]
 
 
 def _publish_hint(e, week: str) -> str:

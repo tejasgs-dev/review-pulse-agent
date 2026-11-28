@@ -146,6 +146,16 @@ publish:
   doc_id: ${PULSE_DOC_ID}
   # The only address the pulse is emailed to (send_email is refused for any other).
   recipient: ${PULSE_RECIPIENT}
+  # agent (default): the LLM (llm.provider) decides which publishing tool to call next, in a
+  # loop: check_already_published, append_week_entry, verify_entry_in_doc, send_pulse_email.
+  # The tools wrap the guarded publisher; doc_id and recipient are never tool parameters,
+  # the email goes out at most once and is never retried. Every step is logged to
+  # runs/{week}/agent_log.json. scripted: the fixed order, no model. Without a working model
+  # the agent mode falls back to scripted. `--mode` on the CLI overrides this.
+  mode: agent
+  agent:
+    max_steps: 8                    # model turns; reaching it stops the run as a failure
+    intro_max_chars: 200            # the one line the agent may write at the top of the email
 
 # §13 #1 (decided 2026-11-22): one remote server, gworkspace-mcp
 # (github.com/tejasgs-dev/GmailGdocMCPServer), serves both Docs and Gmail over Streamable HTTP.

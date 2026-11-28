@@ -69,6 +69,10 @@ class RunSummary:
     word_count: int | None = None
     max_words: int | None = None
     publish: str | None = None           # sent | skipped | dry run | failed | partial
+    # agent (with its model) or scripted, and why when the agent was not used.
+    publish_mode: str | None = None
+    # The agent's tool calls, in order: "tool → status: result · “reason”".
+    agent_steps: list[str] = field(default_factory=list)
     publish_detail: str = ""
     warnings: list[str] = field(default_factory=list)
     stage: str | None = None             # the stage that failed
@@ -128,6 +132,10 @@ class RunSummary:
         if self.publish:
             rows.append(("Publish", self.publish
                          + (f" ({self.publish_detail})" if self.publish_detail else "")))
+        if self.publish_mode:
+            rows.append(("Publish mode", self.publish_mode))
+        for i, step in enumerate(self.agent_steps, start=1):
+            rows.append((f"  Agent step {i}", step))
         if self.error:
             rows.append(("Stopped at", f"{self.stage}: {self.error}"))
         for w in self.warnings:
