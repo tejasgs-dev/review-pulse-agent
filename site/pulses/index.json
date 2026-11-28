@@ -1,7 +1,21 @@
 {
   "schema_version": 1,
-  "latest": "2026-W46",
+  "latest": "2026-W47",
   "weeks": [
+    {
+      "week": "2026-W47",
+      "week_label": "Week of 16 Nov 2026",
+      "window": {
+        "start": "2026-09-14",
+        "end": "2026-11-22"
+      },
+      "review_count": 1286,
+      "general_praise_share": 0.17729393468118196,
+      "top_theme": {
+        "label": "Charges & brokerage",
+        "share": 0.15707620528771385
+      }
+    },
     {
       "week": "2026-W46",
       "week_label": "Week of 9 Nov 2026",

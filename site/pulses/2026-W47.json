@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "week": "2026-W47",
+  "week_label": "Week of 16 Nov 2026",
+  "window": {
+    "start": "2026-09-14",
+    "end": "2026-11-22"
+  },
+  "review_count": 1286,
+  "sources": {
+    "play_store": 1172,
+    "app_store": 114
+  },
+  "filters": {
+    "min_words": 9,
+    "language": "en"
+  },
+  "general_praise_share": 0.17729393468118196,
+  "other_share": 0.1306,
+  "themes": [
+    {
+      "id": "support",
+      "label": "Customer support",
+      "share": 0.1991,
+      "negative_share": 0.875,
+      "review_count": 256,
+      "rank": 2,
+      "top": true
+    },
+    {
+      "id": "performance_bugs",
+      "label": "Bugs & app updates",
+      "share": 0.1827,
+      "negative_share": 0.4511,
+      "review_count": 235,
+      "rank": 4,
+      "top": false
+    },
+    {
+      "id": "charges",
+      "label": "Charges & brokerage",
+      "share": 0.1571,
+      "negative_share": 0.6485,
+      "review_count": 202,
+      "rank": 1,
+      "top": true
+    },
+    {
+      "id": "stocks_portfolio",
+      "label": "Stocks & portfolio",
+      "share": 0.1532,
+      "negative_share": 0.3401,
+      "review_count": 197,
+      "rank": 3,
+      "top": true
+    }
+  ],
+  "top_themes": [
+    {
+      "id": "charges",
+      "label": "Charges & brokerage",
+      "share": 0.15707620528771385,
+      "negative_share": 0.6485148514851485,
+      "summary": "Charges lack clear breakdown before order confirmation."
+    },
+    {
+      "id": "support",
+      "label": "Customer support",
+      "share": 0.19906687402799378,
+      "negative_share": 0.875,
+      "summary": "Support replies are automated and take too long."
+    },
+    {
+      "id": "stocks_portfolio",
+      "label": "Stocks & portfolio",
+      "share": 0.15318818040435458,
+      "negative_share": 0.3401015228426396,
+      "summary": "Portfolio updates and key market features are missing."
+    }
+  ],
+  "quotes": [
+    {
+      "theme_id": "charges",
+      "theme_label": "Charges & brokerage",
+      "text": "Whenever I sell stocks, the per-order charges and other deductions are not clearly displayed. Customers should be able to see the complete brokerage, transaction charges, taxes, and total deductions before confirming every order.",
+      "rating": 3,
+      "source": "play_store"
+    },
+    {
+      "theme_id": "support",
+      "theme_label": "Customer support",
+      "text": "Just pray you never have to contact them. They give the same automated responses which is really frustrating.",
+      "rating": 1,
+      "source": "app_store"
+    },
+    {
+      "theme_id": "stocks_portfolio",
+      "theme_label": "Stocks & portfolio",
+      "text": "We can’t able to track the invested stocks update. Once market closed it is opened properly.",
+      "rating": 1,
+      "source": "app_store"
+    }
+  ],
+  "actions": [
+    {
+      "theme_id": "charges",
+      "theme_label": "Charges & brokerage",
+      "action": "Show full brokerage, taxes and total charges on order confirmation, addressing the issue raised across 46 recent reviews in this theme.",
+      "signal": "Under 46 reviews in two weeks, with fewer charge issues."
+    },
+    {
+      "theme_id": "support",
+      "theme_label": "Customer support",
+      "action": "Speed up replies and give personalized answers instead of generic automated messages, addressing the issue raised across 38 recent reviews in this theme.",
+      "signal": "Under 38 reviews in two weeks, with fewer delayed replies."
+    },
+    {
+      "theme_id": "stocks_portfolio",
+      "theme_label": "Stocks & portfolio",
+      "action": "Add real‑time portfolio tracking and market features like US stock access, addressing the issue raised across 47 recent reviews in this theme.",
+      "signal": "Under 47 reviews in two weeks, with fewer missing feature complaints."
+    }
+  ]
+}
