@@ -232,6 +232,10 @@ def _doctor(tmp_config, monkeypatch, fake_client, *, live: bool = True):
     import pulse.cli as cli
 
     monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    # Test values, so the result never depends on the developer's .env (CI has none).
+    monkeypatch.setenv("PULSE_RECIPIENT", "me@example.com")
+    monkeypatch.setenv("PULSE_MCP_API_KEY", "test-key-0123456789-0123456789-xyz")
+    monkeypatch.setenv("PULSE_DOC_ID", "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_test")
     monkeypatch.setattr(cli, "_mcp_live_checks", lambda cfg, warnings, live: [])
     built: list = []
 
