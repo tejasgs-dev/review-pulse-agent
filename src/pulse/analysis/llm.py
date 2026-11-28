@@ -1,6 +1,16 @@
-"""Thin wrapper around the Anthropic SDK for structured calls (plan Phase 3, architecture §4.4).
+"""Structured model calls behind one interface, `StructuredLlm.parse` (architecture §4.4).
 
-Every call:
+Two providers, picked by `llm.provider` in pulse.yaml:
+
+- **groq** (default, free): `GroqClient`. Strict JSON Schema output; a 429 is waited out
+  using `retry-after`; each call's tokens and the rate-limit headers are logged.
+- **anthropic** (paid, optional `[llm]` extra): `LlmClient`, the Claude client.
+
+Both check why the model stopped before validating the output with pydantic, log the
+(already scrubbed) request and the response to `runs/{week}/llm/`, and raise `LlmError` with
+the same `kind`s. Only text that went through the PII scrub is ever passed in.
+
+The Claude client, for every call:
 - uses the configured model with adaptive thinking and a per-call effort level;
 - streams, and reads the result with `get_final_message()`, so long batches don't time out;
 - asks for structured output with a JSON schema made from a pydantic model;
@@ -18,15 +28,17 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from pulse.config import Effort, LlmConfig
+from pulse.config import Effort, GroqConfig, LlmConfig
 from pulse.fileio import write_json
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -63,8 +75,13 @@ class Usage:
     cache_write_tokens: int = 0
     seconds: float = 0.0
     models: dict[str, int] = field(default_factory=dict)  # model that served -> calls
+    provider: str = "anthropic"
+    rate_limit_waits: int = 0          # 429s that were waited out (Groq)
 
     def add(self, other: Usage) -> None:
+        if other.calls:
+            self.provider = other.provider
+        self.rate_limit_waits += other.rate_limit_waits
         self.calls += other.calls
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
@@ -76,6 +93,8 @@ class Usage:
 
     @property
     def estimated_usd(self) -> float:
+        if self.provider == "groq":
+            return 0.0                 # the free tier
         p = PRICE_PER_MTOK
         return round((self.input_tokens * p["input"] + self.output_tokens * p["output"]
                       + self.cache_read_tokens * p["cache_read"]
@@ -226,7 +245,219 @@ def _usage_of(message: Any, seconds: float) -> Usage:
     )
 
 
+# ---------------------------------------------------------------------------- Groq
+
+GROQ_KEY_ENV = "GROQ_API_KEY"
+_RATE_HEADERS = ("x-ratelimit-limit-tokens", "x-ratelimit-remaining-tokens",
+                 "x-ratelimit-reset-tokens", "x-ratelimit-limit-requests",
+                 "x-ratelimit-remaining-requests", "x-ratelimit-reset-requests")
+
+
+def strict_schema(schema: type[BaseModel]) -> dict[str, Any]:
+    """The pydantic model's JSON Schema in the form Groq's strict mode needs: every object
+    lists all of its properties as required and sets `additionalProperties: false`."""
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            node = {k: walk(v) for k, v in node.items() if k != "default"}
+            if node.get("type") == "object" and "properties" in node:
+                node["required"] = list(node["properties"])
+                node["additionalProperties"] = False
+            return node
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        return node
+
+    return walk(schema.model_json_schema())
+
+
+def _groq():
+    try:
+        import groq
+    except ImportError as e:   # a core dependency; only missing in a broken install
+        raise LlmError("the groq package is not installed: pip install -e .",
+                       kind="missing_dependency") from e
+    return groq
+
+
+def _retry_after(exc: Any) -> float | None:
+    response = getattr(exc, "response", None)
+    value = response.headers.get("retry-after") if response is not None else None
+    try:
+        return float(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+class GroqClient:
+    """Structured calls (and, for the publishing agent, tool calls) to the free Groq API.
+
+    - Strict JSON Schema output (`response_format.json_schema.strict`), validated again with
+      pydantic after the `finish_reason` check.
+    - The SDK's own retries are off. A 429 is waited out here, using `retry-after` when Groq
+      sends it (else 2, 4, 8 … seconds), at most `rate_limit_retries` times. A wait longer
+      than `max_wait_seconds` (such as the daily limit) fails at once with kind `rate_limit`.
+    - Every call is logged with its token use and the rate-limit headers, so the logs show
+      how close a run comes to the free tier's tokens-per-minute limit.
+    - The SDK reads the key from GROQ_API_KEY; it is never logged.
+    """
+
+    def __init__(self, cfg: LlmConfig, *, log_dir: Path | None = None, client: Any | None = None,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
+        self.cfg: GroqConfig = cfg.groq
+        self.log_dir = log_dir
+        self.usage = Usage(provider="groq")
+        self._sleep = sleep
+        if client is None:
+            if not os.environ.get(GROQ_KEY_ENV):
+                raise LlmError(f"{GROQ_KEY_ENV} is not set: add it to .env (free key at "
+                               "console.groq.com/keys)", kind="auth")
+            client = _groq().Groq(max_retries=0, timeout=self.cfg.timeout_seconds)
+        self._client = client
+        self._lock = threading.Lock()
+        self._seq = itertools.count(1)
+
+    def complete(self, *, name: str, messages: list[dict[str, Any]], effort: str,
+                 max_tokens: int | None = None, **extra: Any) -> Any:
+        """One chat completion with 429 handling and logging. Returns the SDK's completion;
+        the caller checks `finish_reason` and reads the message."""
+        groq = _groq()
+        kwargs: dict[str, Any] = {
+            "model": self.cfg.model,
+            "messages": messages,
+            "reasoning_effort": _groq_effort(effort),
+            "max_completion_tokens": max_tokens or self.cfg.max_completion_tokens,
+            "temperature": 0.2,
+            **extra,
+        }
+        with self._lock:
+            seq = next(self._seq)
+        waits: list[float] = []
+        started = time.monotonic()
+        while True:
+            try:
+                raw = self._client.chat.completions.with_raw_response.create(**kwargs)
+                completion = raw.parse()
+                headers = {h: raw.headers.get(h) for h in _RATE_HEADERS
+                           if raw.headers.get(h) is not None}
+                break
+            except groq.RateLimitError as e:
+                wait = _retry_after(e)
+                wait = wait if wait is not None else float(2 ** (len(waits) + 1))
+                if len(waits) >= self.cfg.rate_limit_retries or wait > self.cfg.max_wait_seconds:
+                    self._log(seq, name, kwargs, None, None, {}, waits, error="rate_limit")
+                    raise LlmError(f"{name}: rate limited by Groq (429) after {len(waits)} "
+                                   f"waits; the next wait would be {wait:g}s",
+                                   kind="rate_limit", retryable=True) from e
+                waits.append(wait)
+                with self._lock:
+                    self.usage.rate_limit_waits += 1
+                self._sleep(wait)
+            except groq.AuthenticationError as e:
+                raise LlmError(f"{name}: Groq rejected the API key ({GROQ_KEY_ENV})",
+                               kind="auth") from e
+            except groq.BadRequestError as e:
+                # JSON output that misses the schema is reported as a 400.
+                kind = "schema" if "schema" in str(e).lower() else "api_status"
+                raise LlmError(f"{name}: Groq refused the request ({e.status_code}): "
+                               f"{_short(e)}", kind=kind) from e
+            except groq.APIStatusError as e:
+                raise LlmError(f"{name}: Groq API error {e.status_code}: {_short(e)}",
+                               kind="api_status", retryable=e.status_code >= 500) from e
+            except groq.APIConnectionError as e:   # includes APITimeoutError
+                raise LlmError(f"{name}: could not reach Groq: {e}", kind="connection",
+                               retryable=True) from e
+        call_usage = _groq_usage(completion, time.monotonic() - started)
+        with self._lock:
+            self.usage.add(call_usage)
+        self._log(seq, name, kwargs, completion, call_usage, headers, waits)
+        return completion
+
+    def parse(self, *, name: str, system: str, prefix: str | None, user: str,
+              schema: type[T], effort: Effort, max_tokens: int | None = None) -> T:
+        content = f"{prefix}\n\n{user}" if prefix else user
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
+        response_format = {"type": "json_schema", "json_schema": {
+            "name": schema.__name__, "strict": True, "schema": strict_schema(schema)}}
+        completion = self.complete(name=name, messages=messages, effort=effort,
+                                   max_tokens=max_tokens, response_format=response_format)
+        choice = completion.choices[0]
+        if getattr(choice.message, "refusal", None):
+            raise LlmRefusal(f"{name}: the model declined the request", category=None)
+        if choice.finish_reason == "length":
+            raise LlmError(f"{name}: the response hit max_completion_tokens and is incomplete",
+                           kind="max_tokens")
+        if choice.finish_reason != "stop":
+            raise LlmError(f"{name}: unexpected finish_reason {choice.finish_reason!r}",
+                           kind="schema")
+        try:
+            return schema.model_validate_json(choice.message.content or "")
+        except ValidationError as e:
+            raise LlmError(f"{name}: the response did not match the schema: "
+                           f"{e.error_count()} errors", kind="schema") from e
+
+    def _log(self, seq: int, name: str, kwargs: dict[str, Any], completion: Any,
+             usage: Usage | None, headers: dict[str, str], waits: list[float], *,
+             error: str | None = None) -> None:
+        if self.log_dir is None:
+            return
+        request = {k: v for k, v in kwargs.items() if k != "response_format"}
+        if "response_format" in kwargs:
+            request["response_format"] = kwargs["response_format"]["json_schema"]["name"]
+        request["provider"] = "groq"
+        response: dict[str, Any] = {"rate_limit_waits_seconds": waits}
+        if error:
+            response["error"] = error
+        if completion is not None:
+            choice = completion.choices[0]
+            text = choice.message.content
+            try:
+                output: Any = json.loads(text) if text else None
+            except json.JSONDecodeError:
+                output = text
+            u = getattr(completion, "usage", None)
+            details = getattr(u, "completion_tokens_details", None)
+            response.update({
+                "id": getattr(completion, "id", None),
+                "model": getattr(completion, "model", None),
+                "finish_reason": choice.finish_reason,
+                "tokens": {
+                    "prompt": getattr(u, "prompt_tokens", 0),
+                    "completion": getattr(u, "completion_tokens", 0),
+                    "reasoning": getattr(details, "reasoning_tokens", None),
+                    "total": getattr(u, "total_tokens", 0),
+                },
+                # Groq's own count of what is left this minute / day (tokens = per minute).
+                "rate_limit": headers,
+                "seconds": round(usage.seconds, 2) if usage else None,
+                "output": output,
+                "tool_calls": [{"name": c.function.name, "arguments": c.function.arguments}
+                               for c in (getattr(choice.message, "tool_calls", None) or [])],
+            })
+        write_json(self.log_dir / f"{seq:02d}_{name}.json",
+                   {"request": request, "response": response})
+
+
+def _groq_effort(effort: str) -> str:
+    """Claude-style effort names mapped onto Groq's reasoning_effort (low, medium, high)."""
+    return {"low": "low", "medium": "medium"}.get(effort, "high")
+
+
+def _short(e: Any) -> str:
+    return str(getattr(e, "message", e))[:300]
+
+
+def _groq_usage(completion: Any, seconds: float) -> Usage:
+    u = getattr(completion, "usage", None)
+    return Usage(calls=1, input_tokens=getattr(u, "prompt_tokens", 0) or 0,
+                 output_tokens=getattr(u, "completion_tokens", 0) or 0, seconds=seconds,
+                 models={getattr(completion, "model", None) or "unknown": 1}, provider="groq")
+
+
 def build_llm(cfg: LlmConfig, *, log_dir: Path | None = None) -> StructuredLlm:
-    """The real client. Credentials come from the environment (ANTHROPIC_API_KEY or an
-    `ant auth login` profile). The CLI calls this through the module so tests can patch it."""
+    """The real client for `llm.provider`. Credentials come from the environment
+    (GROQ_API_KEY; or ANTHROPIC_API_KEY / an `ant auth login` profile). The CLI calls this
+    through the module so tests can patch it."""
+    if cfg.provider == "groq":
+        return GroqClient(cfg, log_dir=log_dir)
     return LlmClient(cfg, log_dir=log_dir)

@@ -172,10 +172,79 @@ class EffortConfig(_Strict):
     compose: Effort = "high"
 
 
-class LlmConfig(_Strict):
-    model: str
+Provider = Literal["groq", "anthropic"]
+GroqEffort = Literal["low", "medium", "high"]
+
+
+class GroqEffortConfig(_Strict):
+    """Groq `reasoning_effort` per stage. Lower effort uses fewer reasoning tokens, which
+    matters on the free tier's per-minute token limit."""
+
+    compose: GroqEffort = "medium"
+    agent: GroqEffort = "low"
+
+
+class GroqConfig(_Strict):
+    """The free Groq API (`GROQ_API_KEY`). `openai/gpt-oss-120b` supports strict JSON Schema
+    output and tool calling (Groq docs, checked 2026-11-28)."""
+
+    model: str = "openai/gpt-oss-120b"
+    reasoning_effort: GroqEffortConfig = GroqEffortConfig()
+    max_completion_tokens: int = Field(default=4096, ge=256, le=65_536)
+    timeout_seconds: float = Field(default=60, gt=0)
+    # On HTTP 429: wait for `retry-after` (or back off exponentially) and try again, at most
+    # this many times. A wait longer than max_wait_seconds (e.g. the daily limit) fails at once.
+    rate_limit_retries: int = Field(default=4, ge=0, le=10)
+    max_wait_seconds: float = Field(default=90, gt=0)
+
+
+class AnthropicConfig(_Strict):
+    """The paid Claude API (`ANTHROPIC_API_KEY`, optional `[llm]` extra)."""
+
+    model: str = "claude-opus-5-5"
     effort: EffortConfig = EffortConfig()
     fallbacks: str | None = "default"
+
+
+class LlmConfig(_Strict):
+    """Which model provider the LLM steps use. `provider` picks the block below."""
+
+    provider: Provider = "groq"
+    groq: GroqConfig = GroqConfig()
+    anthropic: AnthropicConfig = AnthropicConfig()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_fields(cls, data: object) -> object:
+        """Older configs set `model`, `effort` and `fallbacks` directly under `llm:`; those
+        were the Claude settings, so they move into `anthropic:` (and imply that provider)."""
+        if not isinstance(data, dict) or not ({"model", "effort", "fallbacks"} & data.keys()):
+            return data
+        data = dict(data)
+        legacy = {k: data.pop(k) for k in ("model", "effort", "fallbacks") if k in data}
+        data["anthropic"] = {**legacy, **(data.get("anthropic") or {})}
+        data.setdefault("provider", "anthropic")
+        return data
+
+    @property
+    def model(self) -> str:
+        """The model of the active provider."""
+        return self.groq.model if self.provider == "groq" else self.anthropic.model
+
+    @property
+    def effort(self) -> EffortConfig:
+        """Claude effort levels (used by the Anthropic client and `--engine llm`)."""
+        return self.anthropic.effort
+
+    @property
+    def fallbacks(self) -> str | None:
+        return self.anthropic.fallbacks
+
+    def stage_effort(self, stage: Literal["compose", "agent"]) -> Effort:
+        """The effort level to pass for a stage, for whichever provider is active."""
+        if self.provider == "groq":
+            return getattr(self.groq.reasoning_effort, stage)
+        return self.anthropic.effort.compose
 
 
 _DOC_URL = re.compile(r"/document/(?:u/\d+/)?d/([A-Za-z0-9_-]+)")
@@ -281,6 +350,20 @@ class PulseConfig(_Strict):
     llm: LlmConfig
     publish: PublishConfig
     mcp: McpConfig
+
+    @model_validator(mode="after")
+    def _engine_provider(self) -> PulseConfig:
+        check_engine_provider(self.analysis.engine, self.llm.provider)
+        return self
+
+
+def check_engine_provider(engine: str, provider: str) -> None:
+    """`--engine llm` clusters every review with the model: far beyond Groq's free daily token
+    limit, so it needs the Claude API."""
+    if engine == "llm" and provider != "anthropic":
+        raise ValueError("analysis.engine: llm clusters every review with the model and needs "
+                         f"llm.provider: anthropic (it is {provider!r}; Groq's free tier is too "
+                         "small for it). Use the default hybrid engine with Groq instead.")
 
 
 def _expand_env(value: object) -> object:

@@ -97,6 +97,13 @@ EngineOpt = Annotated[
 def _with_engine(cfg: PulseConfig, engine: str | None) -> PulseConfig:
     if engine is None or engine == cfg.analysis.engine:
         return cfg
+    from pulse.config import check_engine_provider
+
+    try:
+        check_engine_provider(engine, cfg.llm.provider)
+    except ValueError as e:
+        typer.secho(f"--engine {engine}: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(ExitCode.CONFIG_ERROR) from e
     if engine == "local" and cfg.analysis.local is None:
         typer.secho("--engine local needs an analysis.local section in pulse.yaml",
                     fg=typer.colors.RED, err=True)
@@ -538,6 +545,8 @@ def _usage_since(now, before) -> dict:
         seconds=now.seconds - before.seconds,
         models={m: n - before.models.get(m, 0) for m, n in now.models.items()
                 if n - before.models.get(m, 0)},
+        provider=now.provider,
+        rate_limit_waits=now.rate_limit_waits - before.rate_limit_waits,
     )
     return delta.to_dict()
 
@@ -723,6 +732,11 @@ def doctor(
     warnings: list[str] = []
 
     checks.append((f"analysis engine: {cfg.analysis.engine}", True, ""))
+    checks.append((f"LLM provider: {cfg.llm.provider} ({cfg.llm.model})", True, ""))
+    if cfg.llm.provider == "groq" and not os.environ.get("GROQ_API_KEY"):
+        # Not a failure: every Groq step falls back to rules or the scripted publisher.
+        warnings.append("GROQ_API_KEY is not set: the LLM steps will fall back to rules and "
+                        "the scripted publisher (free key at console.groq.com/keys)")
     if cfg.analysis.engine == "llm":
         has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
         checks.append(("ANTHROPIC_API_KEY is set (LLM engine)", has_key,

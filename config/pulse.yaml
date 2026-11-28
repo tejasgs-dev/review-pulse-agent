@@ -116,9 +116,22 @@ analysis:
   min_agreement: 0.85               # below this, the probe records a warning
 
 llm:
-  model: claude-opus-5-5
-  effort: { cluster: high, assign: medium, compose: high }
-  fallbacks: default
+  # groq (default): free API, key in GROQ_API_KEY. anthropic: paid Claude API, key in
+  # ANTHROPIC_API_KEY (optional `[llm]` extra); `--engine llm` needs it. Only text that has
+  # been through the PII scrub is ever sent to either.
+  provider: groq
+  groq:
+    model: openai/gpt-oss-120b        # production; strict JSON Schema output + tool calling
+    # Lower effort = fewer reasoning tokens against the free tier's ~8,000 tokens/minute.
+    reasoning_effort: { compose: medium, agent: low }
+    max_completion_tokens: 4096
+    timeout_seconds: 60
+    rate_limit_retries: 4             # on HTTP 429: wait for retry-after, then try again
+    max_wait_seconds: 90              # a longer wait (e.g. the daily limit) fails at once
+  anthropic:
+    model: claude-opus-5-5
+    effort: { cluster: high, assign: medium, compose: high }
+    fallbacks: default
 
 publish:
   # One Google Doc, created by hand once. Each week's pulse is appended to it under a heading

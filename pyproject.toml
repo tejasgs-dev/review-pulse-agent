@@ -27,6 +27,9 @@ dependencies = [
     "scikit-learn>=1.5,<2",
     "model2vec>=0.10,<0.11",
     "huggingface-hub>=0.24",
+    # Free LLM provider (default `llm.provider: groq`): hybrid compose and the publishing
+    # agent. Developed on groq 1.7.0; stay on major version 1.
+    "groq>=1.7,<2",
 ]
 
 [project.urls]
@@ -35,7 +38,8 @@ Repository = "https://github.com/tejasgs-dev/review-pulse-agent"
 Issues = "https://github.com/tejasgs-dev/review-pulse-agent/issues"
 
 [project.optional-dependencies]
-# Optional paid engine: `pulse run --engine llm` (Claude API, needs ANTHROPIC_API_KEY).
+# Optional paid provider: `llm.provider: anthropic` (Claude API, needs ANTHROPIC_API_KEY);
+# required by `pulse run --engine llm`.
 llm = ["anthropic>=0.70"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 

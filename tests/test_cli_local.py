@@ -63,6 +63,7 @@ def test_doctor_checks_the_local_engine(tmp_config, monkeypatch):
 
 def test_doctor_checks_the_api_key_for_the_llm_engine(tmp_config, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-    path = tmp_config(lambda d: d["analysis"].__setitem__("engine", "llm"))
+    path = tmp_config(lambda d: (d["analysis"].__setitem__("engine", "llm"),
+                                d["llm"].__setitem__("provider", "anthropic")))
     result = runner.invoke(app, ["doctor", "--offline", "--config", str(path)])
     assert "ANTHROPIC_API_KEY is set (LLM engine)" in result.output

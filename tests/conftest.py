@@ -110,9 +110,11 @@ def _no_real_llm(request, monkeypatch):
         return
 
     def refuse(*args, **kwargs):
-        raise RuntimeError("tests must not call the real Claude API; patch build_llm")
+        raise RuntimeError("tests must not call a real model API; patch build_llm")
 
     monkeypatch.setattr("pulse.analysis.llm.build_llm", refuse)
+    # Belt and braces: a GroqClient built without a fake client fails with kind "auth".
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
 
 @pytest.fixture(autouse=True)

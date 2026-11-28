@@ -5,6 +5,12 @@ from pulse.cli import ExitCode, app
 runner = CliRunner()
 
 
+def _llm_engine_config(d: dict) -> None:
+    """`--engine llm` needs the Claude provider (it clusters every review with the model)."""
+    d["analysis"]["min_reviews"] = 2
+    d["llm"]["provider"] = "anthropic"
+
+
 def test_help_lists_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
@@ -28,7 +34,7 @@ def test_run_dry_run_end_to_end(tmp_config, tmp_path, monkeypatch):
     """Stages 3–6 with the model faked: writes pulse.md, pulse.json, validation.json."""
     import json
 
-    path = tmp_config(lambda d: d["analysis"].__setitem__("min_reviews", 2))
+    path = tmp_config(_llm_engine_config)
     _store_three_reviews(tmp_path)
     _fake_llm(monkeypatch)
     result = runner.invoke(app, ["run", "--week", "2026-W47", "--dry-run", "--skip-ingest",
@@ -51,7 +57,7 @@ def test_run_dry_run_end_to_end(tmp_config, tmp_path, monkeypatch):
 
 def test_run_without_dry_run_publishes_through_mcp(publish_config, tmp_path, monkeypatch,
                                                    fake_mcp):
-    path = publish_config(lambda d: d["analysis"].__setitem__("min_reviews", 2))
+    path = publish_config(_llm_engine_config)
     _store_three_reviews(tmp_path)
     _fake_llm(monkeypatch)
     result = runner.invoke(app, ["run", "--week", "2026-W47", "--skip-ingest",
@@ -72,7 +78,7 @@ def test_run_writes_failure_json_when_validation_keeps_failing(tmp_config, tmp_p
 
     from pulse.analysis.compose import ActionDraft, PulseWriting, ThemeSummary
 
-    path = tmp_config(lambda d: d["analysis"].__setitem__("min_reviews", 2))
+    path = tmp_config(_llm_engine_config)
     _store_three_reviews(tmp_path)
     fake = _fake_llm(monkeypatch)
     # Always one action short: every attempt fails the action check.
@@ -148,7 +154,7 @@ def _fake_llm(monkeypatch):
 def test_analyze_scrubs_clusters_and_writes_themes(tmp_config, tmp_path, monkeypatch):
     import json
 
-    path = tmp_config(lambda d: d["analysis"].__setitem__("min_reviews", 2))
+    path = tmp_config(_llm_engine_config)
     _store_three_reviews(tmp_path)
     fake = _fake_llm(monkeypatch)
 
@@ -178,7 +184,7 @@ def test_analyze_reports_llm_failure(tmp_config, tmp_path, monkeypatch):
         def parse(self, **kw):
             raise llm_mod.LlmRefusal("discover: declined", category="cyber")
 
-    path = tmp_config(lambda d: d["analysis"].__setitem__("min_reviews", 2))
+    path = tmp_config(_llm_engine_config)
     _store_three_reviews(tmp_path)
     monkeypatch.setattr(llm_mod, "build_llm", lambda cfg, log_dir=None: Refusing())
     result = runner.invoke(app, ["analyze", "--week", "2026-W47", "--engine", "llm",
@@ -192,7 +198,7 @@ def test_analyze_reports_llm_failure(tmp_config, tmp_path, monkeypatch):
 def test_analyze_scrubs_window_and_writes_clean_reviews(tmp_config, tmp_path, monkeypatch):
     import json
 
-    path = tmp_config(lambda d: d["analysis"].__setitem__("min_reviews", 2))
+    path = tmp_config(_llm_engine_config)
     _store_three_reviews(tmp_path)
     _fake_llm(monkeypatch)
 
