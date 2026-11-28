@@ -720,13 +720,43 @@ def _mcp_live_checks(cfg: PulseConfig, warnings: list[str], *,
     return out
 
 
+def _groq_live_check(cfg: PulseConfig, warnings: list[str]) -> list[tuple[str, bool, str]]:
+    """One tiny structured call (a fixed prompt, no review text) to prove the key works."""
+    from pydantic import BaseModel
+
+    from pulse.analysis import llm as llm_mod
+
+    class Ping(BaseModel):
+        ok: bool
+
+    label = f"Groq answers with this key ({cfg.llm.groq.model})"
+    try:
+        client = llm_mod.build_llm(cfg.llm)
+        answer = client.parse(name="doctor_ping", system="Reply with JSON only.", prefix=None,
+                              user='Return {"ok": true}.', schema=Ping, effort="low",
+                              max_tokens=512)
+    except llm_mod.LlmError as e:
+        if e.kind == "rate_limit":   # the key works; the free tier is busy right now
+            warnings.append(f"Groq is rate-limiting this key right now: {e}")
+            return [(label, True, "")]
+        hints = {"auth": "check GROQ_API_KEY in .env (console.groq.com/keys)",
+                 "connection": "no network to api.groq.com"}
+        return [(label, False, hints.get(e.kind, str(e)[:200]))]
+    u = client.usage
+    return [(f"{label}: {u.input_tokens + u.output_tokens} tokens, {u.seconds:.1f}s",
+             answer.ok, "the model did not return ok: true")]
+
+
 @app.command()
 def doctor(
     config: ConfigOpt = None,
     live: Annotated[bool, typer.Option(
-        "--live/--offline", help="Reach the MCP server and check its tools.")] = True,
+        "--live/--offline",
+        help="Reach the MCP server and check its tools, and test the Groq key with one tiny "
+             "call.")] = True,
 ) -> None:
-    """Check config, credentials, and MCP setup (and, with --live, the MCP server's tools)."""
+    """Check config, credentials, and MCP setup. With --live (the default) it also reaches the
+    MCP server and checks its tools, and makes one tiny Groq call to test GROQ_API_KEY."""
     cfg = _load(config)
     checks: list[tuple[str, bool, str]] = [("config/pulse.yaml is valid", True, "")]
     warnings: list[str] = []
@@ -737,6 +767,8 @@ def doctor(
         # Not a failure: every Groq step falls back to rules or the scripted publisher.
         warnings.append("GROQ_API_KEY is not set: the LLM steps will fall back to rules and "
                         "the scripted publisher (free key at console.groq.com/keys)")
+    elif cfg.llm.provider == "groq" and live:
+        checks.extend(_groq_live_check(cfg, warnings))
     if cfg.analysis.engine == "llm":
         has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
         checks.append(("ANTHROPIC_API_KEY is set (LLM engine)", has_key,

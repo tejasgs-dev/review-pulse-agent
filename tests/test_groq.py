@@ -221,3 +221,51 @@ def test_llm_engine_on_the_cli_needs_anthropic(tmp_config):
                                       "--config", str(tmp_config())])
     assert result.exit_code == ExitCode.CONFIG_ERROR
     assert "needs llm.provider: anthropic" in result.output
+
+
+# ---------------------------------------------------------------------------- doctor --live
+
+
+def _doctor(tmp_config, monkeypatch, fake_client, *, live: bool = True):
+    import pulse.cli as cli
+
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.setattr(cli, "_mcp_live_checks", lambda cfg, warnings, live: [])
+    built: list = []
+
+    def build(cfg, log_dir=None):
+        built.append(cfg)
+        return fake_client
+
+    monkeypatch.setattr(llm_mod, "build_llm", build)
+    args = ["doctor", "--live" if live else "--offline", "--config", str(tmp_config())]
+    return CliRunner().invoke(app, args), built
+
+
+def test_doctor_live_makes_one_tiny_groq_call(tmp_config, monkeypatch):
+    c, sdk = client(completion('{"ok": true}'))
+    result, _ = _doctor(tmp_config, monkeypatch, c)
+    assert "[ok  ] Groq answers with this key (openai/gpt-oss-120b): 1500 tokens" in result.output
+    (req,) = sdk.requests
+    assert req["reasoning_effort"] == "low"
+    assert "review" not in json.dumps(req["messages"]).lower()   # a fixed prompt only
+
+
+def test_doctor_live_fails_on_a_rejected_key(tmp_config, monkeypatch):
+    response = httpx.Response(401, request=httpx.Request("POST", "https://api.groq.com/x"))
+    c, _ = client(groq.AuthenticationError("bad key", response=response, body=None))
+    result, _ = _doctor(tmp_config, monkeypatch, c)
+    assert result.exit_code == ExitCode.DOCTOR_FAILED
+    assert "FAIL" in result.output and "check GROQ_API_KEY" in result.output
+
+
+def test_doctor_live_only_warns_when_rate_limited(tmp_config, monkeypatch):
+    c, _ = client(rate_limited("3600"))
+    result, _ = _doctor(tmp_config, monkeypatch, c)
+    assert result.exit_code == ExitCode.OK, result.output
+    assert "Groq is rate-limiting this key" in result.output
+
+
+def test_doctor_offline_makes_no_groq_call(tmp_config, monkeypatch):
+    result, built = _doctor(tmp_config, monkeypatch, None, live=False)
+    assert built == [] and "Groq answers" not in result.output

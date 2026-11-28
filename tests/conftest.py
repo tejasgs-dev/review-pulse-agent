@@ -113,8 +113,10 @@ def _no_real_llm(request, monkeypatch):
         raise RuntimeError("tests must not call a real model API; patch build_llm")
 
     monkeypatch.setattr("pulse.analysis.llm.build_llm", refuse)
-    # Belt and braces: a GroqClient built without a fake client fails with kind "auth".
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    # The developer's real key must never reach a test. Empty, not deleted: load_config()
+    # reads the project .env without overriding variables that are already set, so an
+    # empty value keeps the real key out. A GroqClient then fails with kind "auth".
+    monkeypatch.setenv("GROQ_API_KEY", "")
 
 
 @pytest.fixture(autouse=True)
