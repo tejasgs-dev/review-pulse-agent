@@ -442,10 +442,11 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 **Goal:** a weekly pulse that runs unattended and that stakeholders find useful. *(§4.9)*
 
 ### Tasks
-- [ ] Set up the scheduler: Windows Task Scheduler (Mondays 09:00 IST, running `pulse doctor && pulse run`), or a scheduled GitHub Actions workflow.
-- [ ] Compute the run week as the ISO week that just ended (Monday–Sunday, IST).
-- [ ] Name the scheduled workflow file **exactly** `.github/workflows/pulse-check.yml` (display name "Pulse check"). The website's "Pulse check" button links to `https://github.com/tejasgs-dev/review-pulse-agent/actions/workflows/pulse-check.yml`, and its "System status" panel shows that file's status badge (`…/pulse-check.yml/badge.svg`); both show "not set up" until the file exists.
-- [ ] After each successful published run, run `pulse export-site --week <W>` and commit `site/pulses/` so the website shows the new week (only the allowlisted pulse data; architecture §6 exception).
+- [x] Set up the scheduler: a scheduled GitHub Actions workflow, Mondays 09:00 IST (`cron: "30 3 * * 1"`, UTC), plus the manual **Run workflow** button (2026-11-28, agent upgrade Phase 4).
+- [x] Compute the run week as the ISO week that just ended (Monday–Sunday, IST): one "Pick the week" step computes it once (`last_completed_week()`) and passes `--week` to every command; a manual run may name a week.
+- [x] Name the scheduled workflow file **exactly** `.github/workflows/pulse-check.yml` (display name "Pulse check"). The website's "Pulse check" button links to `https://github.com/tejasgs-dev/review-pulse-agent/actions/workflows/pulse-check.yml`, and its "System status" panel shows that file's status badge (`…/pulse-check.yml/badge.svg`).
+- [x] After each published run, run `pulse export-site --week <W>` and commit `site/pulses/` so the website shows the new week (only the allowlisted pulse data; architecture §6 exception). The export runs **only when that run appended the week to the Doc** (`doc.action: appended` in `publish.json`): a re-run for an already-published week has new LLM text that would no longer match the Doc. It also runs when the email failed after the append, so the site never misses a week that is in the Doc.
+- [ ] First manual run on GitHub Actions is green (Doc entry, email, `site/pulses/` commit).
 - [ ] Do **3 consecutive live weekly runs**. For each one:
   - [ ] A human check against the `problemStatement.md` §4 checklist.
   - [ ] Feedback from Product, Support, and Leadership readers: is it scannable, are the themes useful, can the actions be acted on?
@@ -458,6 +459,21 @@ At most 2 fallback rounds; then `failure.json` and exit code 10, as today.
 ### Exit criteria
 - 3 scheduled runs in a row succeed with no manual steps.
 - All checklist items in `problemStatement.md` §4 are ticked for each run.
+
+---
+
+## Agent upgrade (Groq): status
+
+A later upgrade, built on top of Phases 0–6, adds a free LLM (Groq) to the writing and the publishing. The guardrails stay in code.
+
+| Upgrade phase | What | Status |
+|---|---|---|
+| 1 | Groq as the default LLM provider (`llm.provider: groq`, `GROQ_API_KEY`); `pulse doctor --live` tests the key | Done (`d7e33aa`, `aa3f722`) |
+| 2 | `hybrid` engine, now the default: local ML clusters and counts, Groq writes the summaries, quote picks and actions; falls back to rules | Done (`18cd7e5`, `06f33eb`; see [before-after-W46.md](before-after-W46.md)) |
+| 3 | Agentic publishing, now the default (`publish.mode: agent`): the LLM chooses the next tool call among four guarded tools; every step is logged to `runs/{week}/agent_log.json`; falls back to the scripted order | Done (`f8a61f9`) |
+| 4 | `.github/workflows/pulse-check.yml`: the weekly run on GitHub Actions with the hybrid engine and agent publishing, the four secrets, `pulse export-site` and the `site/pulses/` commit | Built 2026-11-28; waiting for the first green manual run |
+
+Deployment (website on Vercel, a small read-only API on Render) comes after this: [deployment-plan.md](deployment-plan.md). It reuses `pulse-check.yml` and never runs the pulse.
 
 ---
 

@@ -6,7 +6,9 @@
 
 ReviewPulse turns public Groww Play Store and App Store reviews into a one-page weekly pulse, appended to a Google Doc and emailed to you, through MCP servers only.
 
-By default the analysis is **free and runs on your machine**: themes come from sentence embeddings (model2vec) and k-means, and the pulse is written by rules and templates. No API key is needed and no review text leaves the machine. The Claude API is an optional engine (`--engine llm`).
+By default everything is **free**. The `hybrid` engine finds and counts themes with local machine learning (model2vec sentence embeddings and k-means). The free [Groq](https://console.groq.com) LLM then reads a small sample of scrubbed quotes per top theme and writes the summaries, quote picks and action ideas. Every number comes from the ML, not the model. Publishing runs in `agent` mode: the LLM chooses the next tool call (check, append, verify, email), and the guardrails stay in code. Without `GROQ_API_KEY`, the pulse is written by rules and templates and published in the fixed order. `--engine local` never calls an API; the paid Claude API is an optional engine (`--engine llm`).
+
+Every Monday the pulse runs unattended on GitHub Actions ([`pulse-check.yml`](.github/workflows/pulse-check.yml)); see [Running on GitHub Actions](#running-on-github-actions).
 
 - What it must do: [docs/problemStatement.md](docs/problemStatement.md)
 - How it is built: [docs/architecture.md](docs/architecture.md)
@@ -80,7 +82,7 @@ The free Render service sleeps after 15 idle minutes. The app polls `health_url`
 
 | File | What it holds |
 |---|---|
-| `.env` (git-ignored; copy `.env.example`) | Secrets and per-user values: `PULSE_DOC_ID`, `PULSE_RECIPIENT`, `PULSE_MCP_API_KEY`, and `ANTHROPIC_API_KEY` for the LLM engine only. Environment variables take precedence, so on Actions they come from repository secrets. |
+| `.env` (git-ignored; copy `.env.example`) | Secrets and per-user values: `GROQ_API_KEY` (free; the hybrid engine and the publishing agent), `PULSE_DOC_ID`, `PULSE_RECIPIENT`, `PULSE_MCP_API_KEY`, and `ANTHROPIC_API_KEY` for the LLM engine only. Environment variables take precedence, so on Actions they come from repository secrets. |
 | `config/pulse.yaml` | Everything else. `${VAR}` references are filled from the environment. |
 | `config/themes.yaml` | The theme catalogue for the local engine: stable IDs, labels, keywords, and the summary/action/signal templates. |
 | `src/pulse/publish/tool_map.yaml` | Maps the app's actions (`doc_contains_text`, `append_to_doc`, `send_email`) to the server's tool names, arguments and result patterns. Checked against the server by `pulse doctor`. |
@@ -93,18 +95,18 @@ The `pulse.yaml` sections you are most likely to change:
 | `window` | `weeks_back` (8–12), `timezone` |
 | `ingest` | `request_delay_seconds`, `max_retries` (per feed page, exponential backoff), `min_words`, `play_public.enabled` (false = read Play Console exports from `data/imports/play/` instead) |
 | `privacy` | `number_min_digits`, `reference_min_digits` |
-| `analysis` | `engine` (`local` or `llm`), `min_reviews` (50: below this the run stops), `max_words` (250), `max_themes`, `top_themes`, `local.*` (model, revision, clustering and word lists) |
-| `llm` | `model`, `effort` (LLM engine only) |
-| `publish` | `doc_id`, `recipient` (from `.env`) |
+| `analysis` | `engine` (`hybrid` default, `local` or `llm`), `min_reviews` (50: below this the run stops), `max_words` (250), `max_themes`, `top_themes`, `local.*` (model, revision, clustering and word lists) |
+| `llm` | `provider` (`groq` default, or `anthropic`), `model`, reasoning effort per step |
+| `publish` | `mode` (`agent` default, or `scripted`), `agent.*` (step limit, intro length), `doc_id`, `recipient` (from `.env`) |
 | `mcp` | server `url`, `health_url`, timeouts; `retries` (2) and `retry_delay_seconds` (10, doubled each retry) for lost connections and timeouts |
 
 ## Commands
 
 ```bash
-pulse run      [--week 2026-W47] [--weeks-back 10] [--dry-run] [--skip-ingest] [--engine local|llm]
+pulse run      [--week 2026-W47] [--weeks-back 10] [--dry-run] [--skip-ingest] [--engine hybrid|local|llm] [--mode agent|scripted]
 pulse ingest   [--source play_store|app_store|all] [--week ...] [--full]
-pulse analyze  [--week ...] [--engine local|llm]
-pulse publish  [--week ...] [--force | --email-only]
+pulse analyze  [--week ...] [--engine hybrid|local|llm]
+pulse publish  [--week ...] [--force | --email-only] [--mode agent|scripted]
 pulse doctor   [--live | --offline]
 pulse export-site [--week ...] [--out site/pulses]
 pulse --version
@@ -163,11 +165,15 @@ It holds counts, statuses and theme labels only: no review text, no recipient ad
 
 ## Running on GitHub Actions
 
-The scheduled workflow itself is set up in Phase 7. What it needs from this repo:
+The weekly run is [`.github/workflows/pulse-check.yml`](.github/workflows/pulse-check.yml) ("Pulse check"). It is the **only** place the pulse runs; the website and its backend only read the result ([docs/deployment-plan.md](docs/deployment-plan.md)).
 
-- **Secrets**: `PULSE_DOC_ID`, `PULSE_RECIPIENT`, `PULSE_MCP_API_KEY` as repository secrets, passed to the job as environment variables (no `.env` file on the runner).
-- **Commands**: `pulse doctor && pulse run`. Every failure exits non-zero, so the job fails visibly; the run summary appears on the job page.
+- **When**: every Monday at 09:00 IST (`cron: "30 3 * * 1"`, which is UTC; GitHub may start it late when busy), or by hand: **Actions → Pulse check → Run workflow**. A manual run can name a `week` and can be a `dry_run` (builds the pulse, publishes and commits nothing).
+- **Secrets** (Settings → Secrets and variables → Actions → New repository secret): `GROQ_API_KEY`, `PULSE_DOC_ID`, `PULSE_RECIPIENT`, `PULSE_MCP_API_KEY`. They are passed to the job as environment variables; there is no `.env` file on the runner.
+- **Steps**: pick the week once (the ISO week that just ended, IST) → `pulse doctor` (config, the Groq key, the MCP server and its tools) → `pulse run --engine hybrid --mode agent` → `pulse export-site` → commit `site/pulses/` as `github-actions[bot]` ("Add the 2026-W47 pulse to the site"). Every failure exits non-zero, so the job fails visibly; the run summary, including the agent's steps, appears on the job page.
+- **Export only after an append.** The site data is exported and committed only when that run appended the week to the Doc. A re-run for a week that is already published succeeds and commits nothing: its new LLM text would no longer match the Doc. If the email fails after the append, the week is still exported and committed, and the job fails; send the email with `pulse publish --week <W> --email-only`.
+- **Permissions**: `contents: write`, only for that commit. `concurrency` keeps two runs from overlapping.
 - **Cache `data/models/`** (keyed on `analysis.local.model_revision`), so the embedding model is not downloaded every week. The download is retried twice if it is.
+- **The schedule stays on**: GitHub turns off scheduled workflows after 60 days with no activity in a public repo; the weekly commit counts as activity.
 - **Nothing is kept between runs.** Each run backfills the whole review window, and `publish.json` is gone afterwards: the Doc marker stops a second publish, and `pulse publish --email-only` sends a missed email. Do not upload `runs/` or `data/` as workflow artifacts in a public repository: they hold review text.
 - **Public logs.** In a public repository anyone can read Actions logs. When `GITHUB_ACTIONS` is set, `pulse run` does not print the composed pulse (it is still in the Doc and the email), and the recipient's address is replaced by `PULSE_RECIPIENT` in every line (in any letter case), including server errors that quote it, config errors about an invalid `PULSE_RECIPIENT`, and unexpected errors with their tracebacks. The end-of-run summary never holds review text, the recipient or the Doc link.
 
@@ -182,7 +188,7 @@ pulse export-site --week 2026-W46
 git add site/pulses && git commit -m "Add the 2026-W46 pulse to the site"
 ```
 
-**Buttons.** *Pulse check* opens the `pulse-check.yml` GitHub Actions workflow in a new tab (the workflow is added in Phase 7). *System status* checks the MCP server's `GET /healthz` for up to 90 seconds ("Checking…", then "Waking up…", then "Online" or "Offline"), and shows the workflow's status badge and the latest published week. The browser can only read `/healthz` if the server sends `Access-Control-Allow-Origin` on that route.
+**Buttons.** *Pulse check* opens the `pulse-check.yml` GitHub Actions workflow in a new tab. *System status* checks the MCP server's `GET /healthz` for up to 90 seconds ("Checking…", then "Waking up…", then "Online" or "Offline"), and shows the workflow's status badge and the latest published week. The browser can only read `/healthz` if the server sends `Access-Control-Allow-Origin` on that route.
 
 **Preview locally.**
 

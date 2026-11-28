@@ -1,0 +1,128 @@
+# The weekly ReviewPulse run: ingest -> ML clustering -> Groq writes the pulse (hybrid engine)
+# -> the Groq publishing agent appends it to the Google Doc and emails it (through the MCP
+# server on Render) -> the week's site data is exported and committed to site/pulses/.
+#
+# This is the only place the pulse runs. The website and its backend only read the result.
+# Keep the file name: the website's "Pulse check" button and status badge link to it.
+name: Pulse check
+
+on:
+  schedule:
+    # Every Monday at 09:00 IST. GitHub cron uses UTC: 09:00 IST = 03:30 UTC.
+    # Scheduled runs can start late when GitHub is busy.
+    - cron: "30 3 * * 1"
+  workflow_dispatch:          # the "Run workflow" button on the Actions tab
+    inputs:
+      week:
+        description: "ISO week, e.g. 2026-W47. Leave empty for the week that just ended (IST)."
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run: build the pulse but publish nothing and commit nothing."
+        type: boolean
+        default: false
+
+permissions:
+  contents: write             # only to commit site/pulses/
+
+concurrency:
+  group: pulse-check          # never two runs at once (a second one waits)
+  cancel-in-progress: false
+
+jobs:
+  pulse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      PULSE_DOC_ID: ${{ secrets.PULSE_DOC_ID }}
+      PULSE_RECIPIENT: ${{ secrets.PULSE_RECIPIENT }}
+      PULSE_MCP_API_KEY: ${{ secrets.PULSE_MCP_API_KEY }}
+      PYTHONIOENCODING: utf-8
+      OMP_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install ReviewPulse
+        run: pip install .
+
+      - name: Pick the week
+        id: week
+        env:
+          WEEK_INPUT: ${{ inputs.week }}   # read from env, never pasted into the script
+        run: |
+          if [ -n "$WEEK_INPUT" ]; then
+            if ! printf '%s' "$WEEK_INPUT" | grep -Eq '^[0-9]{4}-W[0-9]{2}$'; then
+              echo "::error::week must look like 2026-W47"; exit 2
+            fi
+            week="$WEEK_INPUT"
+          else
+            week=$(python -c "from pulse.weeks import last_completed_week; print(last_completed_week())")
+          fi
+          echo "week=$week" >> "$GITHUB_OUTPUT"
+          echo "model_revision=$(grep -oP 'model_revision:\s*\K[0-9a-f]+' config/pulse.yaml)" >> "$GITHUB_OUTPUT"
+          echo "Week: $week"
+
+      - name: Cache the embedding model
+        uses: actions/cache@v4
+        with:
+          path: data/models
+          key: model2vec-${{ steps.week.outputs.model_revision }}
+
+      - name: Check the setup (config, Groq key, MCP server)
+        run: pulse doctor
+
+      - name: Run the pulse (hybrid engine, agent publishing)
+        id: run
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            pulse run --week "${{ steps.week.outputs.week }}" --engine hybrid --dry-run
+          else
+            pulse run --week "${{ steps.week.outputs.week }}" --engine hybrid --mode agent
+          fi
+
+      # Export only when this run appended the week to the Doc. A re-run for a week that is
+      # already published writes new LLM text, which would no longer match the Doc, so it is
+      # not exported. This also runs when the email failed after the append (the job still
+      # fails), so the site never misses a week that is in the Doc.
+      - name: Export the week for the website
+        id: export
+        if: ${{ always() && !inputs.dry_run && steps.run.conclusion != 'skipped' }}
+        env:
+          WEEK: ${{ steps.week.outputs.week }}
+        run: |
+          appended=$(python -c "
+          import json, pathlib, os
+          p = pathlib.Path('runs') / os.environ['WEEK'] / 'publish.json'
+          d = json.loads(p.read_text(encoding='utf-8')) if p.exists() else {}
+          print('yes' if d.get('doc', {}).get('action') == 'appended' else 'no')")
+          if [ "$appended" != "yes" ]; then
+            echo "Not appended in this run (already published, or it failed first): nothing to export."
+            exit 0
+          fi
+          pulse export-site --week "$WEEK"
+          echo "exported=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit site/pulses/
+        if: ${{ always() && steps.export.outputs.exported == 'true' }}
+        env:
+          WEEK: ${{ steps.week.outputs.week }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add site/pulses
+          if git diff --cached --quiet; then
+            echo "site/pulses/ is unchanged."
+            exit 0
+          fi
+          git commit -m "Add the $WEEK pulse to the site"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      # Never upload runs/ or data/ as artifacts: they hold review text and this repo is public.
